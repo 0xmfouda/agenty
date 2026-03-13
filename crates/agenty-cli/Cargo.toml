@@ -1,0 +1,7 @@
+[package]
+name = "agenty-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+agenty-core = { path = "../agenty-core" }
