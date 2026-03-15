@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/agenty-cli","crates/agenty-core"]
+members = ["crates/agenty-types","crates/agenty-cli"]
 
 [workspace.package]
 version = "0.1.0"
