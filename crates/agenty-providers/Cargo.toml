@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-anthropic = ["dep:reqwest", "dep:reqwest-eventsource", "dep:serde", "dep:serde_json"]
+anthropic = ["dep:reqwest", "dep:reqwest-eventsource", "dep:serde", "dep:serde_json", "dep:tokio"]
 
 [dependencies]
 agenty-types = { path = "../agenty-types" }
@@ -14,3 +14,4 @@ reqwest             = { version = "0.12", features = ["json", "stream", "rustls-
 reqwest-eventsource = { version = "0.6",                                 optional = true }
 serde               = { version = "1",    features = ["derive"],         optional = true }
 serde_json          = { version = "1",                                   optional = true }
+tokio               = { version = "1",    features = ["time"],           optional = true }

@@ -16,6 +16,7 @@ dependencies = [
  "reqwest-eventsource",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
