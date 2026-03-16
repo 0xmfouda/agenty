@@ -20,6 +20,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "agenty-session"
+version = "0.1.0"
+dependencies = [
+ "agenty-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "agenty-types"
 version = "0.1.0"
 dependencies = [
