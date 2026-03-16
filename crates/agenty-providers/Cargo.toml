@@ -15,3 +15,11 @@ eventsource-stream  = { version = "0.2",                                 optiona
 serde               = { version = "1",    features = ["derive"],         optional = true }
 serde_json          = { version = "1",                                   optional = true }
 tokio               = { version = "1",    features = ["time"],           optional = true }
+
+[dev-dependencies]
+agenty-types = { path = "../agenty-types" }
+tokio        = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[[test]]
+name              = "anthropic"
+required-features = ["anthropic"]
