@@ -19,6 +19,26 @@ pub struct Session {
     pub tool_calls: Vec<ToolCall>,
     #[serde(default)]
     pub tool_results: Vec<ToolResult>,
+    #[serde(default)]
+    pub tokens: TokenUsage,
+}
+
+/// Cumulative token counts over the lifetime of a session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub input: u64,
+    pub output: u64,
+}
+
+impl TokenUsage {
+    pub fn total(&self) -> u64 {
+        self.input + self.output
+    }
+
+    pub fn add(&mut self, other: TokenUsage) {
+        self.input += other.input;
+        self.output += other.output;
+    }
 }
 
 impl Session {
@@ -32,11 +52,18 @@ impl Session {
             messages: Vec::new(),
             tool_calls: Vec::new(),
             tool_results: Vec::new(),
+            tokens: TokenUsage::default(),
         }
     }
 
     pub fn push_message(&mut self, message: Message) {
         self.messages.push(message);
+        self.updated_at = now_secs();
+    }
+
+    /// Record token usage from a single provider turn.
+    pub fn record_tokens(&mut self, usage: TokenUsage) {
+        self.tokens.add(usage);
         self.updated_at = now_secs();
     }
 
@@ -99,10 +126,16 @@ mod tests {
         session.push_message(Message::new(Role::Assistant, "hello"));
         session.save(&path).unwrap();
 
+        session.record_tokens(TokenUsage { input: 120, output: 45 });
+        session.record_tokens(TokenUsage { input: 30, output: 10 });
+        session.save(&path).unwrap();
+
         let loaded = Session::load(&path).unwrap();
         assert_eq!(loaded.id, "abc");
         assert_eq!(loaded.messages, session.messages);
         assert_eq!(loaded.config, session.config);
+        assert_eq!(loaded.tokens, TokenUsage { input: 150, output: 55 });
+        assert_eq!(loaded.tokens.total(), 205);
 
         fs::remove_dir_all(&dir).ok();
     }
