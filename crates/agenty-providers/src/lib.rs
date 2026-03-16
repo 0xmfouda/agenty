@@ -1,3 +1,6 @@
+#[cfg(feature = "anthropic")]
+pub mod anthropic;
+
 use std::pin::Pin;
 
 use futures::Stream;
