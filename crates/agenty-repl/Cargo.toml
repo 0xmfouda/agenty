@@ -1,0 +1,15 @@
+[package]
+name = "agenty-repl"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+agenty-types     = { path = "../agenty-types" }
+agenty-providers = { path = "../agenty-providers", features = ["anthropic"] }
+agenty-tools     = { path = "../agenty-tools" }
+serde_json       = "1"
+
+[dev-dependencies]
+agenty-tools = { path = "../agenty-tools" }
+tempfile     = "3"
+tokio        = { version = "1", features = ["macros", "rt-multi-thread"] }

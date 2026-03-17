@@ -86,6 +86,82 @@ impl ToolResult {
 }
 
 // ---------------------------------------------------------------------------
+// ContentBlock / ChatMessage
+// ---------------------------------------------------------------------------
+
+/// A single block inside a tool-aware chat message.
+///
+/// Field names and the `type` tag are chosen to match Anthropic's Messages API
+/// wire format so the same struct round-trips in both directions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentBlock {
+    Text { text: String },
+    ToolUse { id: String, name: String, input: JsonValue },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        is_error: bool,
+    },
+}
+
+/// A tool-aware conversation message: role + a sequence of content blocks.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub role: Role,
+    pub content: Vec<ContentBlock>,
+}
+
+impl ChatMessage {
+    pub fn user_text(text: impl Into<String>) -> Self {
+        Self { role: Role::User, content: vec![ContentBlock::Text { text: text.into() }] }
+    }
+
+    pub fn assistant(content: Vec<ContentBlock>) -> Self {
+        Self { role: Role::Assistant, content }
+    }
+
+    pub fn user(content: Vec<ContentBlock>) -> Self {
+        Self { role: Role::User, content }
+    }
+
+    /// Concatenate all `Text` blocks, ignoring tool-use/tool-result blocks.
+    pub fn text(&self) -> String {
+        self.content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    }
+}
+
+/// A tool declaration sent to the provider so the model can call it.
+///
+/// Matches Anthropic's `tools[]` entry shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolSpec {
+    pub name: String,
+    pub description: String,
+    pub input_schema: JsonValue,
+}
+
+/// Why the model stopped generating.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopReason {
+    EndTurn,
+    ToolUse,
+    MaxTokens,
+    StopSequence,
+    #[serde(other)]
+    Other,
+}
+
+// ---------------------------------------------------------------------------
 // Provider
 // ---------------------------------------------------------------------------
 

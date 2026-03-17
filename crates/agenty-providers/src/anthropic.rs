@@ -1,7 +1,9 @@
 use std::pin::Pin;
 use std::time::Duration;
 
-use agenty_types::{AgentError, Config, Message, Role};
+use agenty_types::{
+    AgentError, ChatMessage, Config, ContentBlock, Message, Role, StopReason, ToolSpec,
+};
 use eventsource_stream::Eventsource;
 use futures::{Stream, StreamExt};
 use reqwest::{Client, Response, StatusCode};
@@ -83,8 +85,8 @@ impl AnthropicClient {
             .content
             .into_iter()
             .filter_map(|block| match block {
-                ContentBlock::Text { text } => Some(text),
-                ContentBlock::Unknown => None,
+                TextBlock::Text { text } => Some(text),
+                TextBlock::Unknown => None,
             })
             .collect::<Vec<_>>()
             .join("");
@@ -115,10 +117,44 @@ impl AnthropicClient {
         Ok(Box::pin(tokens) as Pin<Box<dyn Stream<Item = Result<Token, AgentError>> + Send>>)
     }
 
-    /// Send the request with retries, returning the response body-unread on 2xx.
-    async fn send_with_retry(
+    /// Send a `messages` request with `tools`, non-streaming, and parse the
+    /// full response including `stop_reason` and all content blocks.
+    pub async fn send_with_tools(
         &self,
-        body: &MessagesRequest<'_>,
+        config: &Config,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+    ) -> Result<AssistantResponse, AgentError> {
+        let body = ToolsRequest {
+            model: &config.model,
+            max_tokens: config.max_tokens,
+            system: (!config.system_prompt.is_empty()).then_some(&config.system_prompt),
+            tools,
+            messages,
+        };
+        let resp = self.send_with_retry(&body).await?;
+
+        let status = resp.status();
+        let body_text = resp.text().await.map_err(|e| {
+            AgentError::Provider(format!("failed to read response body (HTTP {status}): {e}"))
+        })?;
+
+        let parsed: ToolsResponse = serde_json::from_str(&body_text).map_err(|e| {
+            AgentError::Provider(format!(
+                "failed to decode Anthropic response: {e}; body: {body_text}"
+            ))
+        })?;
+
+        Ok(AssistantResponse {
+            content: parsed.content,
+            stop_reason: parsed.stop_reason,
+        })
+    }
+
+    /// Send the request with retries, returning the response body-unread on 2xx.
+    async fn send_with_retry<B: Serialize + ?Sized>(
+        &self,
+        body: &B,
     ) -> Result<Response, AgentError> {
         let mut attempt: u32 = 0;
         loop {
@@ -137,9 +173,9 @@ impl AnthropicClient {
         }
     }
 
-    async fn send_once(
+    async fn send_once<B: Serialize + ?Sized>(
         &self,
-        body: &MessagesRequest<'_>,
+        body: &B,
     ) -> Result<Response, AttemptError> {
         let resp = self
             .http
@@ -253,12 +289,12 @@ struct MessagesRequest<'a> {
 
 #[derive(Deserialize)]
 struct MessagesResponse {
-    content: Vec<ContentBlock>,
+    content: Vec<TextBlock>,
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum ContentBlock {
+enum TextBlock {
     Text { text: String },
     #[serde(other)]
     Unknown,
@@ -291,4 +327,32 @@ struct ApiErrorDetail {
     #[serde(rename = "type")]
     kind: String,
     message: String,
+}
+
+// ---------------------------------------------------------------------------
+// Tool-use path
+// ---------------------------------------------------------------------------
+
+/// Full non-streaming response from a tool-aware request.
+#[derive(Debug, Clone)]
+pub struct AssistantResponse {
+    pub content: Vec<ContentBlock>,
+    pub stop_reason: StopReason,
+}
+
+#[derive(Serialize)]
+struct ToolsRequest<'a> {
+    model: &'a str,
+    max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<&'a String>,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    tools: &'a [ToolSpec],
+    messages: &'a [ChatMessage],
+}
+
+#[derive(Deserialize)]
+struct ToolsResponse {
+    content: Vec<ContentBlock>,
+    stop_reason: StopReason,
 }

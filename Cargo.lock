@@ -20,6 +20,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "agenty-repl"
+version = "0.1.0"
+dependencies = [
+ "agenty-providers",
+ "agenty-tools",
+ "agenty-types",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "agenty-session"
 version = "0.1.0"
 dependencies = [
