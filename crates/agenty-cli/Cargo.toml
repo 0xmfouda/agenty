@@ -3,4 +3,14 @@ name = "agenty-cli"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "agenty"
+path = "src/main.rs"
+
 [dependencies]
+agenty-types     = { path = "../agenty-types" }
+agenty-providers = { path = "../agenty-providers", features = ["anthropic"] }
+agenty-repl      = { path = "../agenty-repl" }
+agenty-tools     = { path = "../agenty-tools" }
+clap             = { version = "4", features = ["derive"] }
+tokio            = { version = "1", features = ["macros", "rt-multi-thread"] }
