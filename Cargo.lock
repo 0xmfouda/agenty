@@ -7,6 +7,13 @@ name = "agenty-cli"
 version = "0.1.0"
 
 [[package]]
+name = "agenty-plugins"
+version = "0.1.0"
+dependencies = [
+ "agenty-tools",
+]
+
+[[package]]
 name = "agenty-providers"
 version = "0.1.0"
 dependencies = [

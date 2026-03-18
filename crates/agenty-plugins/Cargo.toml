@@ -1,0 +1,7 @@
+[package]
+name = "agenty-plugins"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+agenty-tools = { path = "../agenty-tools" }
