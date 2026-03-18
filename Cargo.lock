@@ -24,6 +24,7 @@ name = "agenty-repl"
 version = "0.1.0"
 dependencies = [
  "agenty-providers",
+ "agenty-session",
  "agenty-tools",
  "agenty-types",
  "serde_json",

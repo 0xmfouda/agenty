@@ -4,21 +4,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-pub use agenty_types::{AgentError, Config, Message, ToolCall, ToolResult};
+pub use agenty_types::{AgentError, ChatMessage, Config};
 
-/// A persisted conversation: config, full message history, and any
-/// outstanding tool-call/result pairs.
+/// A persisted conversation: config and full tool-aware message history.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
     pub created_at: u64,
     pub updated_at: u64,
     pub config: Config,
-    pub messages: Vec<Message>,
-    #[serde(default)]
-    pub tool_calls: Vec<ToolCall>,
-    #[serde(default)]
-    pub tool_results: Vec<ToolResult>,
+    pub messages: Vec<ChatMessage>,
     #[serde(default)]
     pub tokens: TokenUsage,
 }
@@ -50,13 +45,11 @@ impl Session {
             updated_at: now,
             config,
             messages: Vec::new(),
-            tool_calls: Vec::new(),
-            tool_results: Vec::new(),
             tokens: TokenUsage::default(),
         }
     }
 
-    pub fn push_message(&mut self, message: Message) {
+    pub fn push_message(&mut self, message: ChatMessage) {
         self.messages.push(message);
         self.updated_at = now_secs();
     }
@@ -105,7 +98,7 @@ fn serde_err(e: serde_json::Error) -> AgentError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agenty_types::{Provider, Role};
+    use agenty_types::Provider;
 
     fn sample_config() -> Config {
         Config {
@@ -122,8 +115,10 @@ mod tests {
         let path = Session::path_in(&dir, "abc");
 
         let mut session = Session::new("abc", sample_config());
-        session.push_message(Message::new(Role::User, "hi"));
-        session.push_message(Message::new(Role::Assistant, "hello"));
+        session.push_message(ChatMessage::user_text("hi"));
+        session.push_message(ChatMessage::assistant(vec![
+            agenty_types::ContentBlock::Text { text: "hello".into() },
+        ]));
         session.save(&path).unwrap();
 
         session.record_tokens(TokenUsage { input: 120, output: 45 });

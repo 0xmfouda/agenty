@@ -1,5 +1,9 @@
 //! Query loop that drives a provider through tool-call / tool-result turns
-//! until the model stops calling tools.
+//! until the model stops calling tools, plus slash-command dispatch on top.
+
+mod commands;
+
+pub use commands::{Command, ReplOutcome, ReplSession, parse_command};
 
 use agenty_providers::anthropic::AnthropicClient;
 use agenty_tools::Tool;
@@ -43,29 +47,41 @@ impl<'a> Repl<'a> {
         self
     }
 
-    /// Run the loop for `prompt` and return the full conversation once the
-    /// model stops calling tools.
+    /// Run the loop for `prompt` starting from an empty conversation.
     pub async fn run(&self, prompt: &str) -> Result<Vec<ChatMessage>, AgentError> {
-        let mut conversation = vec![ChatMessage::user_text(prompt)];
+        let mut conversation = Vec::new();
+        self.run_turn(&mut conversation, prompt).await?;
+        Ok(conversation)
+    }
+
+    /// Append a user prompt to `conversation`, then loop through tool calls,
+    /// appending everything to the same conversation, until the model stops
+    /// calling tools.
+    pub async fn run_turn(
+        &self,
+        conversation: &mut Vec<ChatMessage>,
+        prompt: &str,
+    ) -> Result<(), AgentError> {
+        conversation.push(ChatMessage::user_text(prompt));
         let specs = self.tool_specs();
 
         for _ in 0..self.options.max_turns {
             let response = self
                 .client
-                .send_with_tools(self.config, &conversation, &specs)
+                .send_with_tools(self.config, conversation, &specs)
                 .await?;
 
             conversation.push(ChatMessage::assistant(response.content.clone()));
 
             if response.stop_reason != StopReason::ToolUse {
-                return Ok(conversation);
+                return Ok(());
             }
 
             let tool_results = self.run_tool_calls(&response.content);
             if tool_results.is_empty() {
                 // Model said tool_use but produced no tool_use blocks — bail
                 // rather than loop forever.
-                return Ok(conversation);
+                return Ok(());
             }
             conversation.push(ChatMessage::user(tool_results));
         }
@@ -74,6 +90,10 @@ impl<'a> Repl<'a> {
             "repl exceeded max_turns = {}",
             self.options.max_turns
         )))
+    }
+
+    pub(crate) fn config(&self) -> &Config {
+        self.config
     }
 
     fn tool_specs(&self) -> Vec<ToolSpec> {
