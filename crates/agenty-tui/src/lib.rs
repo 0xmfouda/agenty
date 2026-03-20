@@ -1,14 +1,15 @@
 //! Interactive TUI renderer wired to the `agenty-repl` query loop.
 //!
 //! Layout (top to bottom):
-//!   - message list (conversation history)
+//!   - message list (conversation history, with live streaming preview)
 //!   - input box (single-line editor)
 //!   - status bar
 
+use std::collections::BTreeMap;
 use std::io::{self, Stdout};
-use std::collections::HashMap;
 
-use agenty_repl::{Repl, StreamDelta};
+use agenty_providers::anthropic::{AnthropicStreamEvent, BlockKind};
+use agenty_repl::Repl;
 use agenty_types::{AgentError, ChatMessage, ContentBlock, Role, StopReason};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -23,9 +24,10 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use tokio::sync::mpsc;
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
+
+const MAX_TURNS: usize = 20;
 
 /// Run the TUI with a [`Repl`] instance. Blocks until the user quits
 /// (Ctrl+C, Esc, `/exit`) or an error occurs.
@@ -52,7 +54,8 @@ fn restore_terminal(terminal: &mut Term) -> io::Result<()> {
 
 enum Status {
     Hint(String),
-    Thinking,
+    Streaming,
+    RunningTools,
     Info(String),
     Error(String),
 }
@@ -66,9 +69,7 @@ impl AppState {
     fn new() -> Self {
         Self {
             input: String::new(),
-            status: Status::Hint(
-                "Enter to send · Ctrl+C to quit".into(),
-            ),
+            status: Status::Hint("Enter to send · Ctrl+C to quit".into()),
         }
     }
 }
@@ -79,263 +80,292 @@ enum KeyAction {
     Submit(String),
 }
 
+/// Per-block streaming buffer, keyed by the block `index` assigned by the
+/// provider. Order is preserved because we use `BTreeMap`.
+enum StreamingBlock {
+    Text(String),
+    Thinking(String),
+    ToolUse { id: String, name: String, partial_json: String },
+}
+
 struct StreamingState {
-    is_streaming: bool,
-    partial_text: HashMap<u32, String>,
-    partial_tool_inputs: HashMap<u32, String>,
-    active_tool_uses: HashMap<u32, (String, String)>,
+    active: bool,
+    blocks: BTreeMap<u32, StreamingBlock>,
 }
 
 impl StreamingState {
     fn new() -> Self {
-        Self {
-            is_streaming: false,
-            partial_text: HashMap::new(),
-            partial_tool_inputs: HashMap::new(),
-            active_tool_uses: HashMap::new(),
+        Self { active: false, blocks: BTreeMap::new() }
+    }
+
+    fn start(&mut self) {
+        self.active = true;
+        self.blocks.clear();
+    }
+
+    fn stop(&mut self) {
+        self.active = false;
+        self.blocks.clear();
+    }
+
+    fn apply(&mut self, event: &AnthropicStreamEvent) {
+        match event {
+            AnthropicStreamEvent::BlockStart { index, kind } => {
+                let block = match kind {
+                    BlockKind::Text => StreamingBlock::Text(String::new()),
+                    BlockKind::Thinking => StreamingBlock::Thinking(String::new()),
+                    BlockKind::ToolUse { id, name } => StreamingBlock::ToolUse {
+                        id: id.clone(),
+                        name: name.clone(),
+                        partial_json: String::new(),
+                    },
+                };
+                self.blocks.insert(*index, block);
+            }
+            AnthropicStreamEvent::TextDelta { index, text } => {
+                if let Some(StreamingBlock::Text(buf)) = self.blocks.get_mut(index) {
+                    buf.push_str(text);
+                }
+            }
+            AnthropicStreamEvent::ThinkingDelta { index, text } => {
+                if let Some(StreamingBlock::Thinking(buf)) = self.blocks.get_mut(index) {
+                    buf.push_str(text);
+                }
+            }
+            AnthropicStreamEvent::ToolInputDelta { index, partial_json } => {
+                if let Some(StreamingBlock::ToolUse { partial_json: buf, .. }) =
+                    self.blocks.get_mut(index)
+                {
+                    buf.push_str(partial_json);
+                }
+            }
+            AnthropicStreamEvent::BlockStop { .. }
+            | AnthropicStreamEvent::StopReason(_)
+            | AnthropicStreamEvent::MessageStop => {}
         }
     }
 
-    fn reset(&mut self) {
-        self.is_streaming = false;
-        self.partial_text.clear();
-        self.partial_tool_inputs.clear();
-        self.active_tool_uses.clear();
-    }
-
-    fn handle_delta(&mut self, delta: StreamDelta) {
-        match delta {
-            StreamDelta::TextDelta { index, text } => {
-                self.partial_text
-                    .entry(index)
-                    .or_insert_with(String::new)
-                    .push_str(&text);
-            }
-            StreamDelta::ToolUseStart { index, id, name } => {
-                self.active_tool_uses.insert(index, (id, name));
-            }
-            StreamDelta::ToolInputDelta { index, partial_json } => {
-                self.partial_tool_inputs
-                    .entry(index)
-                    .or_insert_with(String::new)
-                    .push_str(&partial_json);
-            }
-            StreamDelta::BlockStop { index } => {
-                self.partial_text.remove(&index);
-                self.partial_tool_inputs.remove(&index);
-                self.active_tool_uses.remove(&index);
-            }
-            StreamDelta::MessageComplete { .. } => {
-                self.reset();
-            }
-            StreamDelta::Error(_) => {
-                self.reset();
-            }
-        }
+    /// Build the assistant `ContentBlock`s from the streamed blocks. Thinking
+    /// blocks are dropped (sending them back to the API requires a signature
+    /// we don't currently capture).
+    fn finalize(&self) -> Vec<ContentBlock> {
+        self.blocks
+            .values()
+            .filter_map(|b| match b {
+                StreamingBlock::Text(text) => {
+                    Some(ContentBlock::Text { text: text.clone() })
+                }
+                StreamingBlock::ToolUse { id, name, partial_json } => {
+                    let input = if partial_json.is_empty() {
+                        serde_json::Value::Object(serde_json::Map::new())
+                    } else {
+                        serde_json::from_str(partial_json)
+                            .unwrap_or(serde_json::Value::Null)
+                    };
+                    Some(ContentBlock::ToolUse {
+                        id: id.clone(),
+                        name: name.clone(),
+                        input,
+                    })
+                }
+                StreamingBlock::Thinking(_) => None,
+            })
+            .collect()
     }
 }
 
-async fn event_loop(
-    terminal: &mut Term,
-    repl: Repl<'_>,
-) -> Result<(), AgentError> {
+async fn event_loop(terminal: &mut Term, repl: Repl<'_>) -> Result<(), AgentError> {
     let mut app = AppState::new();
     let mut events = EventStream::new();
     let mut conversation: Vec<ChatMessage> = Vec::new();
-    let mut streaming_state = StreamingState::new();
-
-    let (tx, mut rx) = mpsc::channel::<StreamDelta>(100);
+    let mut streaming = StreamingState::new();
 
     loop {
         terminal
-            .draw(|f| draw(f, &conversation, &streaming_state, &app))
+            .draw(|f| draw(f, &conversation, &streaming, &app))
             .map_err(io_err)?;
 
-        tokio::select! {
-            Some(event) = events.next() => {
-                let event = event.map_err(|e| {
-                    AgentError::Other(format!("terminal event error: {e}"))
-                })?;
+        let Some(event) = events.next().await else {
+            return Ok(());
+        };
+        let event =
+            event.map_err(|e| AgentError::Other(format!("terminal event error: {e}")))?;
 
-                let Event::Key(key) = event else { continue };
-                if key.kind != KeyEventKind::Press {
+        let Event::Key(key) = event else { continue };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+
+        match handle_key(key, &mut app) {
+            KeyAction::None => {}
+            KeyAction::Quit => return Ok(()),
+            KeyAction::Submit(input) => {
+                let trimmed = input.trim();
+                if trimmed.is_empty() {
                     continue;
                 }
 
-                match handle_key(key, &mut app) {
-                    KeyAction::None => {}
-                    KeyAction::Quit => return Ok(()),
-                    KeyAction::Submit(input) => {
-                        if input.trim().is_empty() {
-                            continue;
+                if let Some(action) = dispatch_slash(trimmed) {
+                    match action {
+                        SlashAction::Clear => {
+                            conversation.clear();
+                            app.status = Status::Info("conversation cleared".into());
                         }
-                        if input.starts_with('/') {
-                            match input.trim() {
-                                "/clear" => {
-                                    conversation.clear();
-                                    app.status = Status::Info("conversation cleared".into());
-                                }
-                                "/exit" | "/quit" => return Ok(()),
-                                _ => {
-                                    app.status = Status::Error(format!("unknown command: {}", input));
-                                }
-                            }
-                            continue;
-                        }
-
-                        app.status = Status::Thinking;
-                        streaming_state.reset();
-                        streaming_state.is_streaming = true;
-
-                        let (stop_reason, new_content) = run_streaming_turn(
-                            &repl,
-                            &mut conversation,
-                            &input,
-                            tx.clone(),
-                            &mut streaming_state,
-                        )
-                        .await;
-
-                        match stop_reason {
-                            Ok(StopReason::ToolUse) => {
-                                let tool_results = repl.run_tool_calls(&new_content);
-                                if !tool_results.is_empty() {
-                                    conversation.push(ChatMessage::assistant(new_content));
-                                    conversation.push(ChatMessage::user(tool_results));
-                                }
-                                app.status = Status::Hint(
-                                    "Enter to send · Ctrl+C to quit".into(),
-                                );
-                            }
-                            Ok(_) => {
-                                conversation.push(ChatMessage::assistant(new_content));
-                                app.status = Status::Hint(
-                                    "Enter to send · Ctrl+C to quit".into(),
-                                );
-                            }
-                            Err(e) => {
-                                app.status = Status::Error(e.to_string());
-                            }
+                        SlashAction::Exit => return Ok(()),
+                        SlashAction::Unknown(name) => {
+                            app.status =
+                                Status::Error(format!("unknown command: /{name}"));
                         }
                     }
+                    continue;
+                }
+
+                repl.add_user_message(&mut conversation, trimmed);
+
+                if let Err(e) = run_agent_loop(
+                    terminal,
+                    &repl,
+                    &mut conversation,
+                    &mut streaming,
+                    &mut app,
+                    &mut events,
+                )
+                .await
+                {
+                    app.status = Status::Error(e.to_string());
                 }
             }
-            Some(delta) = rx.recv() => {
-                streaming_state.handle_delta(delta);
-                terminal
-                    .draw(|f| draw(f, &conversation, &streaming_state, &app))
-                    .map_err(io_err)?;
-            }
-            else => return Ok(()),
         }
     }
 }
 
-async fn run_streaming_turn(
+enum SlashAction {
+    Clear,
+    Exit,
+    Unknown(String),
+}
+
+fn dispatch_slash(input: &str) -> Option<SlashAction> {
+    let rest = input.strip_prefix('/')?;
+    let name = rest.split_whitespace().next().unwrap_or("");
+    Some(match name {
+        "clear" => SlashAction::Clear,
+        "exit" | "quit" => SlashAction::Exit,
+        other => SlashAction::Unknown(other.to_string()),
+    })
+}
+
+/// Run one user turn: loop through streaming assistant responses and any tool
+/// calls they produce, until the model stops calling tools (or we hit the cap).
+async fn run_agent_loop(
+    terminal: &mut Term,
     repl: &Repl<'_>,
     conversation: &mut Vec<ChatMessage>,
-    prompt: &str,
-    tx: mpsc::Sender<StreamDelta>,
-    streaming_state: &mut StreamingState,
-) -> (Result<StopReason, AgentError>, Vec<ContentBlock>) {
-    let mut new_content = Vec::new();
-    let mut stop_reason: Option<StopReason> = None;
-    let mut error_message: Option<String> = None;
+    streaming: &mut StreamingState,
+    app: &mut AppState,
+    events: &mut EventStream,
+) -> Result<(), AgentError> {
+    for _ in 0..MAX_TURNS {
+        app.status = Status::Streaming;
+        streaming.start();
+        terminal
+            .draw(|f| draw(f, conversation, streaming, app))
+            .map_err(io_err)?;
 
-    let stream = match repl.client().stream_with_tools(
-        repl.config(),
-        conversation,
-        &repl.tool_specs(),
-    ).await {
-        Ok(s) => s,
-        Err(e) => return (Err(e), vec![]),
-    };
+        let stop_reason =
+            stream_one_turn(terminal, repl, conversation, streaming, app, events).await?;
 
-    repl.add_user_message(conversation, prompt);
+        let assistant_content = streaming.finalize();
+        streaming.stop();
+        conversation.push(ChatMessage::assistant(assistant_content.clone()));
 
+        if stop_reason != StopReason::ToolUse {
+            app.status = Status::Hint("Enter to send · Ctrl+C to quit".into());
+            return Ok(());
+        }
+
+        app.status = Status::RunningTools;
+        terminal
+            .draw(|f| draw(f, conversation, streaming, app))
+            .map_err(io_err)?;
+
+        let tool_results = repl.run_tool_calls(&assistant_content);
+        if tool_results.is_empty() {
+            app.status = Status::Hint("Enter to send · Ctrl+C to quit".into());
+            return Ok(());
+        }
+        conversation.push(ChatMessage::user(tool_results));
+    }
+
+    Err(AgentError::Other(format!(
+        "agent exceeded max turns = {MAX_TURNS}"
+    )))
+}
+
+/// Drive one streaming request, applying deltas to `streaming` and redrawing
+/// between events. Also polls the keyboard so Ctrl+C / Esc can bail early.
+async fn stream_one_turn(
+    terminal: &mut Term,
+    repl: &Repl<'_>,
+    conversation: &[ChatMessage],
+    streaming: &mut StreamingState,
+    app: &mut AppState,
+    events: &mut EventStream,
+) -> Result<StopReason, AgentError> {
+    let specs = repl.tool_specs();
+    let stream = repl
+        .client()
+        .stream_with_tools(repl.config(), conversation, &specs)
+        .await?;
     futures::pin_mut!(stream);
 
-    while let Some(event_result) = stream.next().await {
-        match event_result {
-            Ok(event) => {
-                match event {
-                    agenty_providers::anthropic::AnthropicStreamEvent::BlockStart { index, kind } => {
-                        if let agenty_providers::anthropic::BlockKind::ToolUse { id, name } = kind {
-                            let _ = tx.send(StreamDelta::ToolUseStart { index, id, name }).await;
-                        }
-                    }
-                    agenty_providers::anthropic::AnthropicStreamEvent::TextDelta { index, text } => {
-                        streaming_state.partial_text
-                            .entry(index)
-                            .or_insert_with(String::new)
-                            .push_str(&text);
-                        let _ = tx.send(StreamDelta::TextDelta { index, text }).await;
-                    }
-                    agenty_providers::anthropic::AnthropicStreamEvent::ToolInputDelta { index, partial_json } => {
-                        streaming_state.partial_tool_inputs
-                            .entry(index)
-                            .or_insert_with(String::new)
-                            .push_str(&partial_json);
-                        let _ = tx.send(StreamDelta::ToolInputDelta { index, partial_json }).await;
-                    }
-                    agenty_providers::anthropic::AnthropicStreamEvent::BlockStop { index } => {
-                        streaming_state.partial_text.remove(&index);
-                        streaming_state.partial_tool_inputs.remove(&index);
-                        let _ = tx.send(StreamDelta::BlockStop { index }).await;
-                    }
-                    agenty_providers::anthropic::AnthropicStreamEvent::StopReason(reason) => {
-                        stop_reason = Some(reason);
-                    }
-                    agenty_providers::anthropic::AnthropicStreamEvent::MessageStop => {
-                        new_content = finalize_streaming_content(streaming_state);
-                        let reason = stop_reason.unwrap_or(StopReason::EndTurn);
-                        let _ = tx.send(StreamDelta::MessageComplete { content: new_content.clone(), stop_reason: reason }).await;
-                        break;
+    let mut stop_reason = StopReason::EndTurn;
+
+    loop {
+        tokio::select! {
+            biased;
+            maybe_key = events.next() => {
+                let Some(event) = maybe_key else { continue };
+                let event = event.map_err(|e| {
+                    AgentError::Other(format!("terminal event error: {e}"))
+                })?;
+                if let Event::Key(key) = event {
+                    if key.kind == KeyEventKind::Press
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                        && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('d'))
+                    {
+                        return Err(AgentError::Other("cancelled".into()));
                     }
                 }
             }
-            Err(e) => {
-                error_message = Some(e.to_string());
-                let _ = tx.send(StreamDelta::Error(error_message.clone().unwrap())).await;
-                break;
+            next = stream.next() => {
+                match next {
+                    Some(Ok(event)) => {
+                        let done = matches!(event, AnthropicStreamEvent::MessageStop);
+                        if let AnthropicStreamEvent::StopReason(reason) = &event {
+                            stop_reason = *reason;
+                        }
+                        streaming.apply(&event);
+                        terminal
+                            .draw(|f| draw(f, conversation, streaming, app))
+                            .map_err(io_err)?;
+                        if done {
+                            return Ok(stop_reason);
+                        }
+                    }
+                    Some(Err(e)) => return Err(e),
+                    None => return Ok(stop_reason),
+                }
             }
         }
     }
-
-    let final_stop_reason = match error_message {
-        Some(msg) => Err(AgentError::Provider(msg)),
-        None => Ok(stop_reason.unwrap_or(StopReason::EndTurn)),
-    };
-
-    (final_stop_reason, new_content)
-}
-
-fn finalize_streaming_content(streaming_state: &StreamingState) -> Vec<ContentBlock> {
-    let mut content = Vec::new();
-    
-    for (_index, text) in &streaming_state.partial_text {
-        content.push(ContentBlock::Text { text: text.clone() });
-    }
-    
-    for (index, (id, name)) in &streaming_state.active_tool_uses {
-        let input_json = streaming_state.partial_tool_inputs.get(index)
-            .map(|s| serde_json::from_str(s).unwrap_or(serde_json::Value::Null))
-            .unwrap_or(serde_json::Value::Null);
-        content.push(ContentBlock::ToolUse {
-            id: id.clone(),
-            name: name.clone(),
-            input: input_json,
-        });
-    }
-    
-    content
 }
 
 fn handle_key(key: KeyEvent, app: &mut AppState) -> KeyAction {
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
-        if matches!(key.code, KeyCode::Char('c') | KeyCode::Char('d')) {
-            return KeyAction::Quit;
-        }
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('d'))
+    {
+        return KeyAction::Quit;
     }
     match key.code {
         KeyCode::Esc => KeyAction::Quit,
@@ -402,40 +432,22 @@ fn render_messages(
         lines.push(Line::raw(""));
     }
 
-    if streaming.is_streaming {
-        if !streaming.partial_text.is_empty() || !streaming.active_tool_uses.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "Assistant:",
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-            )));
-
-            let mut sorted_indices: Vec<u32> = streaming.partial_text.keys().copied().collect();
-            sorted_indices.sort();
-            for index in sorted_indices {
-                if let Some(text) = streaming.partial_text.get(&index) {
-                    for l in text.lines() {
-                        lines.push(Line::raw(l.to_string()));
-                    }
-                }
-            }
-
-            let mut sorted_tool_indices: Vec<u32> = streaming.active_tool_uses.keys().copied().collect();
-            sorted_tool_indices.sort();
-            for index in sorted_tool_indices {
-                if let Some((_id, name)) = streaming.active_tool_uses.get(&index) {
-                    let input = streaming.partial_tool_inputs.get(&index).cloned().unwrap_or_default();
-                    lines.push(Line::styled(
-                        format!("  -> tool_use: {name}({input})..."),
-                        Style::default().fg(Color::Yellow),
-                    ));
-                }
-            }
-
-            lines.push(Line::styled(
-                "  [streaming...]",
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
-            ));
+    if streaming.active && !streaming.blocks.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "Assistant:",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for block in streaming.blocks.values() {
+            render_streaming_block(block, &mut lines);
         }
+        lines.push(Line::styled(
+            "  [streaming…]",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        ));
     }
 
     let total = lines.len() as u16;
@@ -443,7 +455,11 @@ fn render_messages(
     let scroll_y = total.saturating_sub(visible);
 
     let para = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" Conversation "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Conversation "),
+        )
         .wrap(Wrap { trim: false })
         .scroll((scroll_y, 0));
     f.render_widget(para, area);
@@ -461,19 +477,51 @@ fn render_content_block(block: &ContentBlock, lines: &mut Vec<Line>) {
         }
         ContentBlock::ToolUse { name, input, .. } => {
             lines.push(Line::styled(
-                format!("  -> tool_use: {name}({input})"),
+                format!("  → tool_use: {name}({input})"),
                 Style::default().fg(Color::Yellow),
             ));
         }
         ContentBlock::ToolResult { content, is_error, .. } => {
             let (marker, style) = if *is_error {
-                ("x", Style::default().fg(Color::Red))
+                ("✗", Style::default().fg(Color::Red))
             } else {
-                ("ok", Style::default().fg(Color::DarkGray))
+                ("✓", Style::default().fg(Color::DarkGray))
             };
             lines.push(Line::styled(
                 format!("  {marker} tool_result: {content}"),
                 style,
+            ));
+        }
+    }
+}
+
+fn render_streaming_block(block: &StreamingBlock, lines: &mut Vec<Line>) {
+    match block {
+        StreamingBlock::Text(text) => {
+            for l in text.lines() {
+                lines.push(Line::raw(l.to_string()));
+            }
+        }
+        StreamingBlock::Thinking(text) => {
+            lines.push(Line::styled(
+                "  thinking:",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            for l in text.lines() {
+                lines.push(Line::styled(
+                    format!("    {l}"),
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::ITALIC),
+                ));
+            }
+        }
+        StreamingBlock::ToolUse { name, partial_json, .. } => {
+            lines.push(Line::styled(
+                format!("  → tool_use: {name}({partial_json})"),
+                Style::default().fg(Color::Yellow),
             ));
         }
     }
@@ -492,12 +540,20 @@ fn render_input(f: &mut Frame, area: Rect, app: &AppState) {
 fn render_status(f: &mut Frame, area: Rect, app: &AppState) {
     let (text, style) = match &app.status {
         Status::Hint(t) => (t.clone(), Style::default().fg(Color::DarkGray)),
-        Status::Thinking => (
-            "thinking...".to_string(),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        Status::Streaming => (
+            "streaming…".to_string(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ),
-        Status::Info(t) => (format!("i  {t}"), Style::default().fg(Color::Blue)),
-        Status::Error(t) => (format!("x {t}"), Style::default().fg(Color::Red)),
+        Status::RunningTools => (
+            "running tools…".to_string(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Status::Info(t) => (format!("ⓘ  {t}"), Style::default().fg(Color::Blue)),
+        Status::Error(t) => (format!("✗ {t}"), Style::default().fg(Color::Red)),
     };
     f.render_widget(Paragraph::new(text).style(style), area);
 }

@@ -117,6 +117,42 @@ impl AnthropicClient {
         Ok(Box::pin(tokens) as Pin<Box<dyn Stream<Item = Result<Token, AgentError>> + Send>>)
     }
 
+    /// Stream a tool-aware `messages` request.
+    ///
+    /// Returns a stream of [`AnthropicStreamEvent`]s that the caller can
+    /// assemble into [`ContentBlock`]s as they arrive. Transport/decoding
+    /// errors surface as `Err` items.
+    pub async fn stream_with_tools(
+        &self,
+        config: &Config,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = Result<AnthropicStreamEvent, AgentError>> + Send>>,
+        AgentError,
+    > {
+        let body = ToolsStreamRequest {
+            model: &config.model,
+            max_tokens: config.max_tokens,
+            system: (!config.system_prompt.is_empty()).then_some(&config.system_prompt),
+            tools,
+            messages,
+            stream: true,
+        };
+        let resp = self.send_with_retry(&body).await?;
+
+        let events = resp.bytes_stream().eventsource();
+        let stream = events.filter_map(|event| async move {
+            match event {
+                Err(e) => Some(Err(AgentError::Provider(format!("SSE transport error: {e}")))),
+                Ok(event) => parse_tool_stream_event(&event.data).transpose(),
+            }
+        });
+
+        Ok(Box::pin(stream)
+            as Pin<Box<dyn Stream<Item = Result<AnthropicStreamEvent, AgentError>> + Send>>)
+    }
+
     /// Send a `messages` request with `tools`, non-streaming, and parse the
     /// full response including `stop_reason` and all content blocks.
     pub async fn send_with_tools(
@@ -355,4 +391,132 @@ struct ToolsRequest<'a> {
 struct ToolsResponse {
     content: Vec<ContentBlock>,
     stop_reason: StopReason,
+}
+
+// ---------------------------------------------------------------------------
+// Streaming tool-use path
+// ---------------------------------------------------------------------------
+
+/// Kind of content block announced by a `content_block_start` event.
+#[derive(Debug, Clone)]
+pub enum BlockKind {
+    Text,
+    ToolUse { id: String, name: String },
+    Thinking,
+}
+
+/// A single decoded event from the Anthropic streaming Messages API.
+#[derive(Debug, Clone)]
+pub enum AnthropicStreamEvent {
+    BlockStart { index: u32, kind: BlockKind },
+    TextDelta { index: u32, text: String },
+    ThinkingDelta { index: u32, text: String },
+    ToolInputDelta { index: u32, partial_json: String },
+    BlockStop { index: u32 },
+    StopReason(StopReason),
+    MessageStop,
+}
+
+#[derive(Serialize)]
+struct ToolsStreamRequest<'a> {
+    model: &'a str,
+    max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<&'a String>,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    tools: &'a [ToolSpec],
+    messages: &'a [ChatMessage],
+    stream: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ToolStreamEvent {
+    ContentBlockStart {
+        index: u32,
+        content_block: ToolStreamBlockStart,
+    },
+    ContentBlockDelta {
+        index: u32,
+        delta: ToolStreamBlockDelta,
+    },
+    ContentBlockStop {
+        index: u32,
+    },
+    MessageDelta {
+        delta: ToolStreamMessageDelta,
+    },
+    MessageStop,
+    Error {
+        error: ApiErrorDetail,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ToolStreamBlockStart {
+    Text,
+    ToolUse { id: String, name: String },
+    Thinking,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ToolStreamBlockDelta {
+    TextDelta { text: String },
+    InputJsonDelta { partial_json: String },
+    ThinkingDelta { thinking: String },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Deserialize)]
+struct ToolStreamMessageDelta {
+    #[serde(default)]
+    stop_reason: Option<StopReason>,
+}
+
+fn parse_tool_stream_event(data: &str) -> Result<Option<AnthropicStreamEvent>, AgentError> {
+    match serde_json::from_str::<ToolStreamEvent>(data) {
+        Ok(ToolStreamEvent::ContentBlockStart { index, content_block }) => {
+            let kind = match content_block {
+                ToolStreamBlockStart::Text => BlockKind::Text,
+                ToolStreamBlockStart::ToolUse { id, name } => BlockKind::ToolUse { id, name },
+                ToolStreamBlockStart::Thinking => BlockKind::Thinking,
+                ToolStreamBlockStart::Unknown => return Ok(None),
+            };
+            Ok(Some(AnthropicStreamEvent::BlockStart { index, kind }))
+        }
+        Ok(ToolStreamEvent::ContentBlockDelta { index, delta }) => Ok(match delta {
+            ToolStreamBlockDelta::TextDelta { text } => {
+                Some(AnthropicStreamEvent::TextDelta { index, text })
+            }
+            ToolStreamBlockDelta::InputJsonDelta { partial_json } => {
+                Some(AnthropicStreamEvent::ToolInputDelta { index, partial_json })
+            }
+            ToolStreamBlockDelta::ThinkingDelta { thinking } => {
+                Some(AnthropicStreamEvent::ThinkingDelta { index, text: thinking })
+            }
+            ToolStreamBlockDelta::Unknown => None,
+        }),
+        Ok(ToolStreamEvent::ContentBlockStop { index }) => {
+            Ok(Some(AnthropicStreamEvent::BlockStop { index }))
+        }
+        Ok(ToolStreamEvent::MessageDelta { delta }) => {
+            Ok(delta.stop_reason.map(AnthropicStreamEvent::StopReason))
+        }
+        Ok(ToolStreamEvent::MessageStop) => Ok(Some(AnthropicStreamEvent::MessageStop)),
+        Ok(ToolStreamEvent::Error { error }) => Err(AgentError::Provider(format!(
+            "Anthropic stream error: {}: {}",
+            error.kind, error.message
+        ))),
+        Ok(ToolStreamEvent::Unknown) => Ok(None),
+        Err(e) => Err(AgentError::Provider(format!(
+            "failed to decode tool-stream SSE event: {e}; data: {data}"
+        ))),
+    }
 }

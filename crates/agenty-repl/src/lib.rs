@@ -11,6 +11,19 @@ use agenty_types::{
     AgentError, ChatMessage, Config, ContentBlock, StopReason, ToolSpec,
 };
 
+/// Incremental progress from a streaming turn. TUIs and other consumers
+/// assemble these into live UI updates.
+#[derive(Debug, Clone)]
+pub enum StreamDelta {
+    TextDelta { index: u32, text: String },
+    ThinkingDelta { index: u32, text: String },
+    ToolUseStart { index: u32, id: String, name: String },
+    ToolInputDelta { index: u32, partial_json: String },
+    BlockStop { index: u32 },
+    MessageComplete { content: Vec<ContentBlock>, stop_reason: StopReason },
+    Error(String),
+}
+
 /// Behavioural options for the query loop.
 #[derive(Debug, Clone, Copy)]
 pub struct ReplOptions {
@@ -92,11 +105,20 @@ impl<'a> Repl<'a> {
         )))
     }
 
-    pub(crate) fn config(&self) -> &Config {
+    pub fn client(&self) -> &'a AnthropicClient {
+        self.client
+    }
+
+    pub fn config(&self) -> &Config {
         self.config
     }
 
-    fn tool_specs(&self) -> Vec<ToolSpec> {
+    /// Append a user-text message to `conversation`.
+    pub fn add_user_message(&self, conversation: &mut Vec<ChatMessage>, text: &str) {
+        conversation.push(ChatMessage::user_text(text));
+    }
+
+    pub fn tool_specs(&self) -> Vec<ToolSpec> {
         self.tools
             .iter()
             .map(|t| ToolSpec {
@@ -107,7 +129,7 @@ impl<'a> Repl<'a> {
             .collect()
     }
 
-    fn run_tool_calls(&self, blocks: &[ContentBlock]) -> Vec<ContentBlock> {
+    pub fn run_tool_calls(&self, blocks: &[ContentBlock]) -> Vec<ContentBlock> {
         blocks
             .iter()
             .filter_map(|block| match block {

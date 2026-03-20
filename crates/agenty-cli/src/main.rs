@@ -33,12 +33,12 @@ struct Cli {
 async fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    let Some(ref prompt) = cli.prompt else {
-        eprintln!("interactive mode is not implemented yet; pass -p <PROMPT>");
-        return ExitCode::from(2);
+    let result = match cli.prompt.clone() {
+        Some(prompt) => run_headless(&cli, &prompt).await,
+        None => run_tui(&cli).await,
     };
 
-    match run_headless(&cli, prompt).await {
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");
@@ -47,14 +47,17 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run_headless(cli: &Cli, prompt: &str) -> Result<(), agenty_types::AgentError> {
-    let config = Config {
+fn build_config(cli: &Cli) -> Config {
+    Config {
         model: cli.model.clone(),
         provider: Provider::Anthropic,
         max_tokens: cli.max_tokens,
         system_prompt: cli.system.clone(),
-    };
+    }
+}
 
+async fn run_headless(cli: &Cli, prompt: &str) -> Result<(), agenty_types::AgentError> {
+    let config = build_config(cli);
     let client = AnthropicClient::new(None)?;
 
     let bash = BashTool;
@@ -73,4 +76,18 @@ async fn run_headless(cli: &Cli, prompt: &str) -> Result<(), agenty_types::Agent
         }
     }
     Ok(())
+}
+
+async fn run_tui(cli: &Cli) -> Result<(), agenty_types::AgentError> {
+    let config = build_config(cli);
+    let client = AnthropicClient::new(None)?;
+
+    let bash = BashTool;
+    let read = ReadFileTool;
+    let write = WriteFileTool;
+    let list = ListFilesTool;
+    let tools: Vec<&dyn Tool> = vec![&bash, &read, &write, &list];
+
+    let repl = Repl::new(&client, &config, tools);
+    agenty_tui::run(repl).await
 }
