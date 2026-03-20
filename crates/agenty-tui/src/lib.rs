@@ -580,17 +580,41 @@ fn render_messages(
     let gap: u16 = 1;
     let heights: Vec<u16> =
         boxes.iter().map(|b| b.outer_height(area.width)).collect();
-    let total: u16 = heights.iter().copied().sum::<u16>()
+    let boxes_total: u16 = heights.iter().copied().sum::<u16>()
         + gap * heights.len().saturating_sub(1) as u16;
+
+    // The ASCII banner is always kept at the top of the scroll stack so
+    // scrolling up past the oldest message reveals it.
+    let banner_lines = build_banner_lines(area.width);
+    let banner_height = banner_lines.len() as u16;
+    let banner_top_pad: u16 = if banner_height > 0 { 2 } else { 0 };
+    let banner_gap: u16 = if banner_height > 0 { 1 } else { 0 };
+    let total = banner_top_pad
+        .saturating_add(banner_height)
+        .saturating_add(banner_gap)
+        .saturating_add(boxes_total);
+
+    let render_stack = |buf: &mut Buffer, origin_x: u16, origin_y: u16| {
+        let mut y = origin_y;
+        if banner_height > 0 {
+            y = y.saturating_add(banner_top_pad);
+            let rect = Rect { x: origin_x, y, width: area.width, height: banner_height };
+            Paragraph::new(banner_lines.clone())
+                .alignment(Alignment::Center)
+                .style(Style::default().bg(theme::BG))
+                .render(rect, buf);
+            y = y.saturating_add(banner_height + banner_gap);
+        }
+        for (i, b) in boxes.iter().enumerate() {
+            let rect = Rect { x: origin_x, y, width: area.width, height: heights[i] };
+            b.render(buf, rect);
+            y = y.saturating_add(heights[i] + gap);
+        }
+    };
 
     if total <= area.height {
         app.scroll_offset = 0;
-        let mut y = area.y;
-        for (i, b) in boxes.iter().enumerate() {
-            let rect = Rect { x: area.x, y, width: area.width, height: heights[i] };
-            b.render(f.buffer_mut(), rect);
-            y = y.saturating_add(heights[i] + gap);
-        }
+        render_stack(f.buffer_mut(), area.x, area.y);
         return;
     }
 
@@ -601,12 +625,13 @@ fn render_messages(
 
     let off_area = Rect::new(0, 0, area.width, total);
     let mut off = Buffer::empty(off_area);
-    let mut y: u16 = 0;
-    for (i, b) in boxes.iter().enumerate() {
-        let rect = Rect { x: 0, y, width: area.width, height: heights[i] };
-        b.render(&mut off, rect);
-        y = y.saturating_add(heights[i] + gap);
-    }
+    // Pre-fill with the app background so gap rows between boxes keep BG
+    // when blitted (otherwise the terminal's own background shows through).
+    Paragraph::new("")
+        .style(Style::default().bg(theme::BG))
+        .render(off_area, &mut off);
+
+    render_stack(&mut off, 0, 0);
 
     let src_start_y = max_offset - app.scroll_offset;
     let frame_buf = f.buffer_mut();
@@ -635,6 +660,23 @@ fn render_messages(
             )))
             .render(rect, f.buffer_mut());
         }
+    }
+}
+
+fn build_banner_lines(width: u16) -> Vec<Line<'static>> {
+    let style = Style::default()
+        .fg(theme::PURPLE)
+        .bg(theme::BG)
+        .add_modifier(Modifier::BOLD);
+    if width >= BANNER_WIDTH {
+        BANNER
+            .lines()
+            .map(|l| Line::from(Span::styled(l.to_string(), style)))
+            .collect()
+    } else if width >= "AGENTY".len() as u16 {
+        vec![Line::from(Span::styled("AGENTY", style))]
+    } else {
+        Vec::new()
     }
 }
 
