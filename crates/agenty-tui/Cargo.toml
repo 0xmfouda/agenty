@@ -7,7 +7,7 @@ edition.workspace = true
 agenty-types     = { path = "../agenty-types" }
 agenty-repl      = { path = "../agenty-repl" }
 agenty-providers = { path = "../agenty-providers", features = ["anthropic"] }
-ratatui          = "0.29"
+ratatui          = { version = "0.29", features = ["unstable-rendered-line-info"] }
 crossterm        = { version = "0.28", features = ["event-stream"] }
 futures          = "0.3"
 futures-util     = "0.3"

@@ -142,12 +142,17 @@ impl AnthropicClient {
         let resp = self.send_with_retry(&body).await?;
 
         let events = resp.bytes_stream().eventsource();
-        let stream = events.filter_map(|event| async move {
-            match event {
-                Err(e) => Some(Err(AgentError::Provider(format!("SSE transport error: {e}")))),
-                Ok(event) => parse_tool_stream_event(&event.data).transpose(),
-            }
-        });
+        let stream = events
+            .map(|event| match event {
+                Err(e) => {
+                    vec![Err(AgentError::Provider(format!("SSE transport error: {e}")))]
+                }
+                Ok(event) => match parse_tool_stream_event(&event.data) {
+                    Ok(list) => list.into_iter().map(Ok).collect(),
+                    Err(e) => vec![Err(e)],
+                },
+            })
+            .flat_map(futures::stream::iter);
 
         Ok(Box::pin(stream)
             as Pin<Box<dyn Stream<Item = Result<AnthropicStreamEvent, AgentError>> + Send>>)
@@ -414,6 +419,9 @@ pub enum AnthropicStreamEvent {
     ToolInputDelta { index: u32, partial_json: String },
     BlockStop { index: u32 },
     StopReason(StopReason),
+    /// Running token usage for the in-flight response. `input_tokens` arrives
+    /// once via `message_start`; `output_tokens` is updated via `message_delta`.
+    Usage { input_tokens: u32, output_tokens: u32 },
     MessageStop,
 }
 
@@ -432,6 +440,9 @@ struct ToolsStreamRequest<'a> {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ToolStreamEvent {
+    MessageStart {
+        message: ToolStreamMessageStart,
+    },
     ContentBlockStart {
         index: u32,
         content_block: ToolStreamBlockStart,
@@ -445,6 +456,8 @@ enum ToolStreamEvent {
     },
     MessageDelta {
         delta: ToolStreamMessageDelta,
+        #[serde(default)]
+        usage: Option<ToolStreamUsage>,
     },
     MessageStop,
     Error {
@@ -452,6 +465,20 @@ enum ToolStreamEvent {
     },
     #[serde(other)]
     Unknown,
+}
+
+#[derive(Deserialize)]
+struct ToolStreamMessageStart {
+    #[serde(default)]
+    usage: Option<ToolStreamUsage>,
+}
+
+#[derive(Deserialize)]
+struct ToolStreamUsage {
+    #[serde(default)]
+    input_tokens: Option<u32>,
+    #[serde(default)]
+    output_tokens: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -480,41 +507,61 @@ struct ToolStreamMessageDelta {
     stop_reason: Option<StopReason>,
 }
 
-fn parse_tool_stream_event(data: &str) -> Result<Option<AnthropicStreamEvent>, AgentError> {
+fn parse_tool_stream_event(data: &str) -> Result<Vec<AnthropicStreamEvent>, AgentError> {
     match serde_json::from_str::<ToolStreamEvent>(data) {
+        Ok(ToolStreamEvent::MessageStart { message }) => {
+            Ok(message
+                .usage
+                .map(|u| AnthropicStreamEvent::Usage {
+                    input_tokens: u.input_tokens.unwrap_or(0),
+                    output_tokens: u.output_tokens.unwrap_or(0),
+                })
+                .into_iter()
+                .collect())
+        }
         Ok(ToolStreamEvent::ContentBlockStart { index, content_block }) => {
             let kind = match content_block {
                 ToolStreamBlockStart::Text => BlockKind::Text,
                 ToolStreamBlockStart::ToolUse { id, name } => BlockKind::ToolUse { id, name },
                 ToolStreamBlockStart::Thinking => BlockKind::Thinking,
-                ToolStreamBlockStart::Unknown => return Ok(None),
+                ToolStreamBlockStart::Unknown => return Ok(Vec::new()),
             };
-            Ok(Some(AnthropicStreamEvent::BlockStart { index, kind }))
+            Ok(vec![AnthropicStreamEvent::BlockStart { index, kind }])
         }
         Ok(ToolStreamEvent::ContentBlockDelta { index, delta }) => Ok(match delta {
             ToolStreamBlockDelta::TextDelta { text } => {
-                Some(AnthropicStreamEvent::TextDelta { index, text })
+                vec![AnthropicStreamEvent::TextDelta { index, text }]
             }
             ToolStreamBlockDelta::InputJsonDelta { partial_json } => {
-                Some(AnthropicStreamEvent::ToolInputDelta { index, partial_json })
+                vec![AnthropicStreamEvent::ToolInputDelta { index, partial_json }]
             }
             ToolStreamBlockDelta::ThinkingDelta { thinking } => {
-                Some(AnthropicStreamEvent::ThinkingDelta { index, text: thinking })
+                vec![AnthropicStreamEvent::ThinkingDelta { index, text: thinking }]
             }
-            ToolStreamBlockDelta::Unknown => None,
+            ToolStreamBlockDelta::Unknown => Vec::new(),
         }),
         Ok(ToolStreamEvent::ContentBlockStop { index }) => {
-            Ok(Some(AnthropicStreamEvent::BlockStop { index }))
+            Ok(vec![AnthropicStreamEvent::BlockStop { index }])
         }
-        Ok(ToolStreamEvent::MessageDelta { delta }) => {
-            Ok(delta.stop_reason.map(AnthropicStreamEvent::StopReason))
+        Ok(ToolStreamEvent::MessageDelta { delta, usage }) => {
+            let mut out = Vec::new();
+            if let Some(reason) = delta.stop_reason {
+                out.push(AnthropicStreamEvent::StopReason(reason));
+            }
+            if let Some(u) = usage {
+                out.push(AnthropicStreamEvent::Usage {
+                    input_tokens: u.input_tokens.unwrap_or(0),
+                    output_tokens: u.output_tokens.unwrap_or(0),
+                });
+            }
+            Ok(out)
         }
-        Ok(ToolStreamEvent::MessageStop) => Ok(Some(AnthropicStreamEvent::MessageStop)),
+        Ok(ToolStreamEvent::MessageStop) => Ok(vec![AnthropicStreamEvent::MessageStop]),
         Ok(ToolStreamEvent::Error { error }) => Err(AgentError::Provider(format!(
             "Anthropic stream error: {}: {}",
             error.kind, error.message
         ))),
-        Ok(ToolStreamEvent::Unknown) => Ok(None),
+        Ok(ToolStreamEvent::Unknown) => Ok(Vec::new()),
         Err(e) => Err(AgentError::Provider(format!(
             "failed to decode tool-stream SSE event: {e}; data: {data}"
         ))),
