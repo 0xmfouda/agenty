@@ -138,6 +138,10 @@ impl AnthropicClient {
             tools,
             messages,
             stream: true,
+            thinking: config.thinking_budget.map(|budget_tokens| ThinkingConfig {
+                kind: "enabled",
+                budget_tokens,
+            }),
         };
         let resp = self.send_with_retry(&body).await?;
 
@@ -416,6 +420,10 @@ pub enum AnthropicStreamEvent {
     BlockStart { index: u32, kind: BlockKind },
     TextDelta { index: u32, text: String },
     ThinkingDelta { index: u32, text: String },
+    /// Signature that authenticates a thinking block. Anthropic requires it to
+    /// be echoed back verbatim in follow-up assistant turns when tool use is
+    /// involved.
+    SignatureDelta { index: u32, signature: String },
     ToolInputDelta { index: u32, partial_json: String },
     BlockStop { index: u32 },
     StopReason(StopReason),
@@ -435,6 +443,15 @@ struct ToolsStreamRequest<'a> {
     tools: &'a [ToolSpec],
     messages: &'a [ChatMessage],
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<ThinkingConfig>,
+}
+
+#[derive(Serialize)]
+struct ThinkingConfig {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    budget_tokens: u32,
 }
 
 #[derive(Deserialize)]
@@ -497,6 +514,7 @@ enum ToolStreamBlockDelta {
     TextDelta { text: String },
     InputJsonDelta { partial_json: String },
     ThinkingDelta { thinking: String },
+    SignatureDelta { signature: String },
     #[serde(other)]
     Unknown,
 }
@@ -537,6 +555,9 @@ fn parse_tool_stream_event(data: &str) -> Result<Vec<AnthropicStreamEvent>, Agen
             }
             ToolStreamBlockDelta::ThinkingDelta { thinking } => {
                 vec![AnthropicStreamEvent::ThinkingDelta { index, text: thinking }]
+            }
+            ToolStreamBlockDelta::SignatureDelta { signature } => {
+                vec![AnthropicStreamEvent::SignatureDelta { index, signature }]
             }
             ToolStreamBlockDelta::Unknown => Vec::new(),
         }),

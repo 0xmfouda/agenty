@@ -19,6 +19,7 @@ fn test_config() -> Config {
         provider: Provider::Anthropic,
         max_tokens: 64,
         system_prompt: String::new(),
+        thinking_budget: None,
     }
 }
 

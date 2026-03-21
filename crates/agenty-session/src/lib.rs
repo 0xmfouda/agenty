@@ -106,6 +106,7 @@ mod tests {
             provider: Provider::Anthropic,
             max_tokens: 1024,
             system_prompt: "you are helpful".into(),
+            thinking_budget: None,
         }
     }
 

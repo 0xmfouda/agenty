@@ -44,6 +44,7 @@ async fn repl_invokes_list_files_tool_and_reports_results() {
         provider: Provider::Anthropic,
         max_tokens: 1024,
         system_prompt: "You are a helpful assistant. When the user asks about files, call the list_files tool. After tool results come back, reply with a concise message naming the files.".to_string(),
+        thinking_budget: None,
     };
 
     let tool = ListFilesTool;

@@ -97,6 +97,13 @@ impl ToolResult {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     Text { text: String },
+    /// Extended-thinking output. `signature` must be echoed back in follow-up
+    /// assistant turns when tool use is involved, per Anthropic's API.
+    Thinking {
+        thinking: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        signature: String,
+    },
     ToolUse { id: String, name: String, input: JsonValue },
     ToolResult {
         tool_use_id: String,
@@ -191,6 +198,9 @@ pub struct Config {
     pub max_tokens: u32,
     /// System prompt prepended to every conversation.
     pub system_prompt: String,
+    /// Extended-thinking budget in tokens. `None` disables thinking.
+    #[serde(default)]
+    pub thinking_budget: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------

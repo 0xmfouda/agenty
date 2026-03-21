@@ -53,7 +53,6 @@ mod theme {
     pub const GREEN_LIGHT: Color = Color::Rgb(0x34, 0xd3, 0x99);
     pub const RED: Color = Color::Rgb(0xef, 0x44, 0x44);
     pub const RED_LIGHT: Color = Color::Rgb(0xf8, 0x71, 0x71);
-    pub const GRAY: Color = Color::Rgb(0x6b, 0x73, 0x94);
     pub const STATUS_BG: Color = Color::Rgb(0x12, 0x14, 0x1c);
     pub const INLINE_CODE_BG: Color = Color::Rgb(0x1a, 0x1d, 0x2e);
 }
@@ -118,7 +117,13 @@ struct AppState {
     output_tokens: u64,
     /// In-flight output_tokens for the current turn (reset on MessageStop).
     last_output: u32,
+    /// Monotonic counter bumped on each ~100ms tick during streaming; used to
+    /// select the current frame of the "thinking..." spinner animation.
+    anim_tick: u64,
 }
+
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const THINKING_DOTS: &[&str] = &["", ".", "..", "..."];
 
 impl AppState {
     fn new(model: String) -> Self {
@@ -131,6 +136,7 @@ impl AppState {
             input_tokens: 0,
             output_tokens: 0,
             last_output: 0,
+            anim_tick: 0,
         }
     }
 }
@@ -155,7 +161,7 @@ enum SlashAction {
 // Per-block streaming buffer, keyed by the block index.
 enum StreamingBlock {
     Text(String),
-    Thinking(String),
+    Thinking { text: String, signature: String },
     ToolUse { id: String, name: String, partial_json: String },
 }
 
@@ -184,7 +190,10 @@ impl StreamingState {
             AnthropicStreamEvent::BlockStart { index, kind } => {
                 let block = match kind {
                     BlockKind::Text => StreamingBlock::Text(String::new()),
-                    BlockKind::Thinking => StreamingBlock::Thinking(String::new()),
+                    BlockKind::Thinking => StreamingBlock::Thinking {
+                        text: String::new(),
+                        signature: String::new(),
+                    },
                     BlockKind::ToolUse { id, name } => StreamingBlock::ToolUse {
                         id: id.clone(),
                         name: name.clone(),
@@ -199,8 +208,17 @@ impl StreamingState {
                 }
             }
             AnthropicStreamEvent::ThinkingDelta { index, text } => {
-                if let Some(StreamingBlock::Thinking(buf)) = self.blocks.get_mut(index) {
+                if let Some(StreamingBlock::Thinking { text: buf, .. }) =
+                    self.blocks.get_mut(index)
+                {
                     buf.push_str(text);
+                }
+            }
+            AnthropicStreamEvent::SignatureDelta { index, signature } => {
+                if let Some(StreamingBlock::Thinking { signature: buf, .. }) =
+                    self.blocks.get_mut(index)
+                {
+                    buf.push_str(signature);
                 }
             }
             AnthropicStreamEvent::ToolInputDelta { index, partial_json } => {
@@ -217,12 +235,30 @@ impl StreamingState {
         }
     }
 
+    /// Is any thinking block currently receiving deltas (or present at all
+    /// during this turn)? Used to drive the status-bar spinner.
+    fn has_thinking(&self) -> bool {
+        self.blocks
+            .values()
+            .any(|b| matches!(b, StreamingBlock::Thinking { .. }))
+    }
+
     fn finalize(&self) -> Vec<ContentBlock> {
         self.blocks
             .values()
             .filter_map(|b| match b {
                 StreamingBlock::Text(text) => {
                     Some(ContentBlock::Text { text: text.clone() })
+                }
+                StreamingBlock::Thinking { text, signature } => {
+                    if text.is_empty() {
+                        None
+                    } else {
+                        Some(ContentBlock::Thinking {
+                            thinking: text.clone(),
+                            signature: signature.clone(),
+                        })
+                    }
                 }
                 StreamingBlock::ToolUse { id, name, partial_json } => {
                     let input = if partial_json.is_empty() {
@@ -237,7 +273,6 @@ impl StreamingState {
                         input,
                     })
                 }
-                StreamingBlock::Thinking(_) => None,
             })
             .collect()
     }
@@ -387,9 +422,19 @@ async fn stream_one_turn(
     futures::pin_mut!(stream);
 
     let mut stop_reason = StopReason::EndTurn;
+    let mut anim = tokio::time::interval(std::time::Duration::from_millis(120));
+    anim.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Burn the first immediate tick so we don't redraw twice on entry.
+    anim.tick().await;
     loop {
         tokio::select! {
             biased;
+            _ = anim.tick() => {
+                app.anim_tick = app.anim_tick.wrapping_add(1);
+                terminal
+                    .draw(|f| draw(f, conversation, streaming, app, None))
+                    .map_err(io_err)?;
+            }
             maybe_key = events.next() => {
                 let Some(event) = maybe_key else { continue };
                 let event = event.map_err(|e| {
@@ -554,7 +599,7 @@ fn draw(
 
     render_messages(f, chunks[0], conversation, streaming, app, error_banner);
     render_input(f, chunks[1], app);
-    render_status(f, chunks[2], app, conversation);
+    render_status(f, chunks[2], app, streaming, conversation);
 }
 
 // ---------------------------------------------------------------------------
@@ -569,7 +614,7 @@ fn render_messages(
     app: &mut AppState,
     error_banner: Option<&str>,
 ) {
-    let boxes = build_boxes(conversation, streaming, error_banner);
+    let boxes = build_boxes(conversation, streaming, error_banner, app.anim_tick);
 
     if boxes.is_empty() {
         app.scroll_offset = 0;
@@ -656,7 +701,7 @@ fn render_messages(
             let rect = Rect { x, y, width: hint_w, height: 1 };
             Paragraph::new(Line::from(Span::styled(
                 hint,
-                Style::default().fg(theme::AMBER).bg(theme::BG),
+                Style::default().fg(theme::PURPLE_LIGHT).bg(theme::BG),
             )))
             .render(rect, f.buffer_mut());
         }
@@ -810,6 +855,7 @@ fn build_boxes(
     conversation: &[ChatMessage],
     streaming: &StreamingState,
     error_banner: Option<&str>,
+    anim_tick: u64,
 ) -> Vec<MessageBox> {
     let mut boxes = Vec::new();
 
@@ -827,8 +873,8 @@ fn build_boxes(
                 StreamingBlock::Text(text) if !text.is_empty() => {
                     boxes.push(assistant_box(text, &[], true));
                 }
-                StreamingBlock::Thinking(text) if !text.is_empty() => {
-                    boxes.push(thinking_box(text));
+                StreamingBlock::Thinking { text, .. } if !text.is_empty() => {
+                    boxes.push(streaming_thinking_box(text, anim_tick));
                 }
                 StreamingBlock::ToolUse { name, partial_json, .. } => {
                     let input = if partial_json.is_empty() {
@@ -870,7 +916,7 @@ fn flush_user(msg: &ChatMessage, boxes: &mut Vec<MessageBox>) {
                 }
                 boxes.push(tool_result_box(content, *is_error));
             }
-            ContentBlock::ToolUse { .. } => {}
+            ContentBlock::ToolUse { .. } | ContentBlock::Thinking { .. } => {}
         }
     }
     if !text_buf.is_empty() {
@@ -903,6 +949,15 @@ fn flush_assistant(msg: &ChatMessage, boxes: &mut Vec<MessageBox>) {
                     text_buf.clear();
                 }
                 boxes.push(tool_call_box(name, input, false));
+            }
+            ContentBlock::Thinking { thinking, .. } => {
+                if !text_buf.is_empty() {
+                    boxes.push(assistant_box(&text_buf, &tool_names, false));
+                    text_buf.clear();
+                }
+                if !thinking.is_empty() {
+                    boxes.push(thinking_box(thinking, false));
+                }
             }
             ContentBlock::ToolResult { .. } => {}
         }
@@ -982,10 +1037,31 @@ fn tool_result_box(content: &str, is_error: bool) -> MessageBox {
     }
 }
 
-fn thinking_box(text: &str) -> MessageBox {
+fn thinking_box(text: &str, streaming: bool) -> MessageBox {
+    if streaming {
+        streaming_thinking_box(text, 0)
+    } else {
+        MessageBox {
+            label: "[THINKING]".into(),
+            border_color: theme::PURPLE_LIGHT,
+            footer: Vec::new(),
+            lines: parse_content(
+                text,
+                Style::default()
+                    .fg(theme::DIM)
+                    .bg(theme::BG)
+                    .add_modifier(Modifier::ITALIC),
+            ),
+        }
+    }
+}
+
+fn streaming_thinking_box(text: &str, anim_tick: u64) -> MessageBox {
+    let spinner = SPINNER_FRAMES[(anim_tick as usize) % SPINNER_FRAMES.len()];
+    let dots = THINKING_DOTS[(anim_tick as usize / 3) % THINKING_DOTS.len()];
     MessageBox {
-        label: "[SYSTEM] thinking".into(),
-        border_color: theme::GRAY,
+        label: format!("[THINKING] {spinner} thinking{dots}"),
+        border_color: theme::PURPLE_LIGHT,
         footer: Vec::new(),
         lines: parse_content(
             text,
@@ -1343,7 +1419,13 @@ fn render_input(f: &mut Frame, area: Rect, app: &AppState) {
 // Status bar
 // ---------------------------------------------------------------------------
 
-fn render_status(f: &mut Frame, area: Rect, app: &AppState, conversation: &[ChatMessage]) {
+fn render_status(
+    f: &mut Frame,
+    area: Rect,
+    app: &AppState,
+    streaming: &StreamingState,
+    conversation: &[ChatMessage],
+) {
     let model_chip = format!(" {} ", app.model);
     let conn = if app.connected { " ● connected " } else { " ● offline   " };
     let conn_style = if app.connected {
@@ -1352,8 +1434,14 @@ fn render_status(f: &mut Frame, area: Rect, app: &AppState, conversation: &[Chat
         Style::default().fg(theme::RED_LIGHT).bg(theme::STATUS_BG)
     };
 
+    let thinking = streaming.active && streaming.has_thinking();
     let status_text = match &app.status {
         Status::Idle => String::new(),
+        Status::Streaming if thinking => {
+            let spinner = SPINNER_FRAMES[(app.anim_tick as usize) % SPINNER_FRAMES.len()];
+            let dots = THINKING_DOTS[(app.anim_tick as usize / 3) % THINKING_DOTS.len()];
+            format!(" {spinner} thinking{dots} ")
+        }
         Status::Streaming => " streaming… ".into(),
         Status::RunningTools => " running tools… ".into(),
         Status::Info(t) => format!(" ⓘ {t} "),
@@ -1361,6 +1449,12 @@ fn render_status(f: &mut Frame, area: Rect, app: &AppState, conversation: &[Chat
     };
     let status_style = match &app.status {
         Status::Idle | Status::Info(_) => Style::default().fg(theme::DIM).bg(theme::STATUS_BG),
+        Status::Streaming if thinking => {
+            Style::default()
+                .fg(theme::PURPLE_LIGHT)
+                .bg(theme::STATUS_BG)
+                .add_modifier(Modifier::BOLD)
+        }
         Status::Streaming | Status::RunningTools => {
             Style::default().fg(theme::AMBER).bg(theme::STATUS_BG)
         }

@@ -6,7 +6,7 @@ use agenty_tools::{BashTool, ListFilesTool, ReadFileTool, Tool, WriteFileTool};
 use agenty_types::{Config, Provider};
 use clap::Parser;
 
-const DEFAULT_MODEL: &str = "claude-haiku-4-5-20251001";
+const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 
 /// Headless agent runner.
 #[derive(Parser, Debug)]
@@ -27,6 +27,10 @@ struct Cli {
     /// System prompt prepended to every request.
     #[arg(short = 's', long, default_value = "")]
     system: String,
+
+    /// Enable extended thinking with the given token budget (e.g. `--thinking 4096`).
+    #[arg(long, value_name = "BUDGET")]
+    thinking: Option<u32>,
 }
 
 #[tokio::main]
@@ -53,6 +57,7 @@ fn build_config(cli: &Cli) -> Config {
         provider: Provider::Anthropic,
         max_tokens: cli.max_tokens,
         system_prompt: cli.system.clone(),
+        thinking_budget: cli.thinking,
     }
 }
 
