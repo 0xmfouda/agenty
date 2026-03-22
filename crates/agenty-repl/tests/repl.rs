@@ -6,6 +6,7 @@
 //! ANTHROPIC_API_KEY=sk-... cargo test -p agenty-repl --test repl -- --nocapture
 //! ```
 
+use agenty_providers::ChatClient;
 use agenty_providers::anthropic::AnthropicClient;
 use agenty_repl::Repl;
 use agenty_tools::{ListFilesTool, Tool};
@@ -13,12 +14,14 @@ use agenty_core::{ChatMessage, Config, ContentBlock, Provider};
 
 const TEST_MODEL: &str = "claude-haiku-4-5-20251001";
 
-fn client_or_skip() -> Option<AnthropicClient> {
+fn client_or_skip() -> Option<ChatClient> {
     if std::env::var("ANTHROPIC_API_KEY").is_err() {
         eprintln!("skipping: ANTHROPIC_API_KEY is not set");
         return None;
     }
-    Some(AnthropicClient::new(None).expect("client should build when key is set"))
+    Some(ChatClient::Anthropic(
+        AnthropicClient::new(None).expect("client should build when key is set"),
+    ))
 }
 
 fn has_tool_use(conversation: &[ChatMessage]) -> bool {

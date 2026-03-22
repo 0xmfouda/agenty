@@ -126,6 +126,7 @@ impl<'a> ReplSession<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agenty_providers::ChatClient;
     use agenty_providers::anthropic::AnthropicClient;
     use agenty_core::{ChatMessage, ContentBlock, Provider};
 
@@ -139,14 +140,16 @@ mod tests {
         }
     }
 
-    fn dummy_client() -> AnthropicClient {
+    fn dummy_client() -> ChatClient {
         // An explicit key means `new` does not require the env var; no network
         // call happens for the command-only tests below.
-        AnthropicClient::new(Some("sk-ant-test-not-real".into())).unwrap()
+        ChatClient::Anthropic(
+            AnthropicClient::new(Some("sk-ant-test-not-real".into())).unwrap(),
+        )
     }
 
     fn dummy_session<'a>(
-        client: &'a AnthropicClient,
+        client: &'a ChatClient,
         config: &'a agenty_core::Config,
         dir: &std::path::Path,
     ) -> ReplSession<'a> {

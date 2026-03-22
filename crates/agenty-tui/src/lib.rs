@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::io::{self, Stdout};
 
-use agenty_providers::anthropic::{AnthropicStreamEvent, BlockKind};
+use agenty_providers::{BlockKind, ProviderStreamEvent};
 use agenty_repl::Repl;
 use agenty_core::{AgentError, ChatMessage, ContentBlock, Role, StopReason};
 use crossterm::event::{
@@ -186,9 +186,9 @@ impl StreamingState {
         self.blocks.clear();
     }
 
-    fn apply(&mut self, event: &AnthropicStreamEvent) {
+    fn apply(&mut self, event: &ProviderStreamEvent) {
         match event {
-            AnthropicStreamEvent::BlockStart { index, kind } => {
+            ProviderStreamEvent::BlockStart { index, kind } => {
                 let block = match kind {
                     BlockKind::Text => StreamingBlock::Text(String::new()),
                     BlockKind::Thinking => StreamingBlock::Thinking {
@@ -203,36 +203,36 @@ impl StreamingState {
                 };
                 self.blocks.insert(*index, block);
             }
-            AnthropicStreamEvent::TextDelta { index, text } => {
+            ProviderStreamEvent::TextDelta { index, text } => {
                 if let Some(StreamingBlock::Text(buf)) = self.blocks.get_mut(index) {
                     buf.push_str(text);
                 }
             }
-            AnthropicStreamEvent::ThinkingDelta { index, text } => {
+            ProviderStreamEvent::ThinkingDelta { index, text } => {
                 if let Some(StreamingBlock::Thinking { text: buf, .. }) =
                     self.blocks.get_mut(index)
                 {
                     buf.push_str(text);
                 }
             }
-            AnthropicStreamEvent::SignatureDelta { index, signature } => {
+            ProviderStreamEvent::SignatureDelta { index, signature } => {
                 if let Some(StreamingBlock::Thinking { signature: buf, .. }) =
                     self.blocks.get_mut(index)
                 {
                     buf.push_str(signature);
                 }
             }
-            AnthropicStreamEvent::ToolInputDelta { index, partial_json } => {
+            ProviderStreamEvent::ToolInputDelta { index, partial_json } => {
                 if let Some(StreamingBlock::ToolUse { partial_json: buf, .. }) =
                     self.blocks.get_mut(index)
                 {
                     buf.push_str(partial_json);
                 }
             }
-            AnthropicStreamEvent::BlockStop { .. }
-            | AnthropicStreamEvent::StopReason(_)
-            | AnthropicStreamEvent::Usage { .. }
-            | AnthropicStreamEvent::MessageStop => {}
+            ProviderStreamEvent::BlockStop { .. }
+            | ProviderStreamEvent::StopReason(_)
+            | ProviderStreamEvent::Usage { .. }
+            | ProviderStreamEvent::MessageStop => {}
         }
     }
 
@@ -485,12 +485,12 @@ async fn stream_one_turn(
             next = stream.next() => {
                 match next {
                     Some(Ok(event)) => {
-                        let done = matches!(event, AnthropicStreamEvent::MessageStop);
+                        let done = matches!(event, ProviderStreamEvent::MessageStop);
                         match &event {
-                            AnthropicStreamEvent::StopReason(reason) => {
+                            ProviderStreamEvent::StopReason(reason) => {
                                 stop_reason = *reason;
                             }
-                            AnthropicStreamEvent::Usage { input_tokens, output_tokens } => {
+                            ProviderStreamEvent::Usage { input_tokens, output_tokens } => {
                                 // message_start carries input_tokens once (+a small
                                 // output priming count); message_delta updates the
                                 // final output_tokens. Take the max so we never

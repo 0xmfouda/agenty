@@ -5,7 +5,7 @@ edition.workspace = true
 
 [dependencies]
 agenty-core      = { path = "../agenty-core" }
-agenty-providers = { path = "../agenty-providers", features = ["anthropic"] }
+agenty-providers = { path = "../agenty-providers", features = ["anthropic", "openai"] }
 agenty-session   = { path = "../agenty-session" }
 agenty-tools     = { path = "../agenty-tools" }
 serde_json       = "1"

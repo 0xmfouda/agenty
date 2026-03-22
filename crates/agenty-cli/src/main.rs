@@ -1,12 +1,17 @@
 use std::process::ExitCode;
 
+use agenty_core::{AgentError, Config, Provider};
+use agenty_providers::ChatClient;
 use agenty_providers::anthropic::AnthropicClient;
+use agenty_providers::gemini::GeminiClient;
+use agenty_providers::openai::OpenAIClient;
 use agenty_repl::Repl;
 use agenty_tools::{BashTool, ListFilesTool, ReadFileTool, Tool, WriteFileTool};
-use agenty_core::{Config, Provider};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
-const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
+const DEFAULT_OPENAI_MODEL: &str = "gpt-4o-mini";
+const DEFAULT_GEMINI_MODEL: &str = "gemini-2.0-flash";
 
 /// Headless agent runner.
 #[derive(Parser, Debug)]
@@ -16,9 +21,13 @@ struct Cli {
     #[arg(short = 'p', long, value_name = "TEXT")]
     prompt: Option<String>,
 
-    /// Model id to use for the provider.
-    #[arg(short = 'm', long, default_value = DEFAULT_MODEL)]
-    model: String,
+    /// LLM provider to route requests to.
+    #[arg(long, value_enum, default_value_t = ProviderArg::Anthropic)]
+    provider: ProviderArg,
+
+    /// Model id to use for the provider. Defaults depend on `--provider`.
+    #[arg(short = 'm', long)]
+    model: Option<String>,
 
     /// Max tokens per provider response.
     #[arg(long, default_value_t = 1024)]
@@ -29,8 +38,33 @@ struct Cli {
     system: String,
 
     /// Enable extended thinking with the given token budget (e.g. `--thinking 4096`).
+    /// Anthropic-only; ignored for other providers.
     #[arg(long, value_name = "BUDGET")]
     thinking: Option<u32>,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum ProviderArg {
+    Anthropic,
+    Openai,
+    Gemini,
+}
+
+impl ProviderArg {
+    fn to_core(self) -> Provider {
+        match self {
+            ProviderArg::Anthropic => Provider::Anthropic,
+            ProviderArg::Openai => Provider::OpenAI,
+            ProviderArg::Gemini => Provider::Gemini,
+        }
+    }
+    fn default_model(self) -> &'static str {
+        match self {
+            ProviderArg::Anthropic => DEFAULT_ANTHROPIC_MODEL,
+            ProviderArg::Openai => DEFAULT_OPENAI_MODEL,
+            ProviderArg::Gemini => DEFAULT_GEMINI_MODEL,
+        }
+    }
 }
 
 #[tokio::main]
@@ -54,17 +88,28 @@ async fn main() -> ExitCode {
 
 fn build_config(cli: &Cli) -> Config {
     Config {
-        model: cli.model.clone(),
-        provider: Provider::Anthropic,
+        model: cli
+            .model
+            .clone()
+            .unwrap_or_else(|| cli.provider.default_model().to_string()),
+        provider: cli.provider.to_core(),
         max_tokens: cli.max_tokens,
         system_prompt: cli.system.clone(),
         thinking_budget: cli.thinking,
     }
 }
 
-async fn run_headless(cli: &Cli, prompt: &str) -> Result<(), agenty_core::AgentError> {
+fn build_client(provider: ProviderArg) -> Result<ChatClient, AgentError> {
+    Ok(match provider {
+        ProviderArg::Anthropic => ChatClient::Anthropic(AnthropicClient::new(None)?),
+        ProviderArg::Openai => ChatClient::OpenAI(OpenAIClient::new(None)?),
+        ProviderArg::Gemini => ChatClient::Gemini(GeminiClient::new(None)?),
+    })
+}
+
+async fn run_headless(cli: &Cli, prompt: &str) -> Result<(), AgentError> {
     let config = build_config(cli);
-    let client = AnthropicClient::new(None)?;
+    let client = build_client(cli.provider)?;
 
     let bash = BashTool;
     let read = ReadFileTool;
@@ -84,9 +129,9 @@ async fn run_headless(cli: &Cli, prompt: &str) -> Result<(), agenty_core::AgentE
     Ok(())
 }
 
-async fn run_tui(cli: &Cli) -> Result<(), agenty_core::AgentError> {
+async fn run_tui(cli: &Cli) -> Result<(), AgentError> {
     let config = build_config(cli);
-    let client = AnthropicClient::new(None)?;
+    let client = build_client(cli.provider)?;
 
     let bash = BashTool;
     let read = ReadFileTool;

@@ -9,7 +9,9 @@ use futures::{Stream, StreamExt};
 use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 
-use crate::{Token, TokenStream};
+use crate::{
+    AssistantResponse, BlockKind, ProviderEventStream, ProviderStreamEvent, Token, TokenStream,
+};
 
 const ANTHROPIC_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -119,7 +121,7 @@ impl AnthropicClient {
 
     /// Stream a tool-aware `messages` request.
     ///
-    /// Returns a stream of [`AnthropicStreamEvent`]s that the caller can
+    /// Returns a stream of [`ProviderStreamEvent`]s that the caller can
     /// assemble into [`ContentBlock`]s as they arrive. Transport/decoding
     /// errors surface as `Err` items.
     pub async fn stream_with_tools(
@@ -127,10 +129,7 @@ impl AnthropicClient {
         config: &Config,
         messages: &[ChatMessage],
         tools: &[ToolSpec],
-    ) -> Result<
-        Pin<Box<dyn Stream<Item = Result<AnthropicStreamEvent, AgentError>> + Send>>,
-        AgentError,
-    > {
+    ) -> Result<ProviderEventStream, AgentError> {
         let body = ToolsStreamRequest {
             model: &config.model,
             max_tokens: config.max_tokens,
@@ -158,8 +157,7 @@ impl AnthropicClient {
             })
             .flat_map(futures::stream::iter);
 
-        Ok(Box::pin(stream)
-            as Pin<Box<dyn Stream<Item = Result<AnthropicStreamEvent, AgentError>> + Send>>)
+        Ok(Box::pin(stream) as ProviderEventStream)
     }
 
     /// Send a `messages` request with `tools`, non-streaming, and parse the
@@ -378,13 +376,6 @@ struct ApiErrorDetail {
 // Tool-use path
 // ---------------------------------------------------------------------------
 
-/// Full non-streaming response from a tool-aware request.
-#[derive(Debug, Clone)]
-pub struct AssistantResponse {
-    pub content: Vec<ContentBlock>,
-    pub stop_reason: StopReason,
-}
-
 #[derive(Serialize)]
 struct ToolsRequest<'a> {
     model: &'a str,
@@ -405,33 +396,6 @@ struct ToolsResponse {
 // ---------------------------------------------------------------------------
 // Streaming tool-use path
 // ---------------------------------------------------------------------------
-
-/// Kind of content block announced by a `content_block_start` event.
-#[derive(Debug, Clone)]
-pub enum BlockKind {
-    Text,
-    ToolUse { id: String, name: String },
-    Thinking,
-}
-
-/// A single decoded event from the Anthropic streaming Messages API.
-#[derive(Debug, Clone)]
-pub enum AnthropicStreamEvent {
-    BlockStart { index: u32, kind: BlockKind },
-    TextDelta { index: u32, text: String },
-    ThinkingDelta { index: u32, text: String },
-    /// Signature that authenticates a thinking block. Anthropic requires it to
-    /// be echoed back verbatim in follow-up assistant turns when tool use is
-    /// involved.
-    SignatureDelta { index: u32, signature: String },
-    ToolInputDelta { index: u32, partial_json: String },
-    BlockStop { index: u32 },
-    StopReason(StopReason),
-    /// Running token usage for the in-flight response. `input_tokens` arrives
-    /// once via `message_start`; `output_tokens` is updated via `message_delta`.
-    Usage { input_tokens: u32, output_tokens: u32 },
-    MessageStop,
-}
 
 #[derive(Serialize)]
 struct ToolsStreamRequest<'a> {
@@ -525,12 +489,12 @@ struct ToolStreamMessageDelta {
     stop_reason: Option<StopReason>,
 }
 
-fn parse_tool_stream_event(data: &str) -> Result<Vec<AnthropicStreamEvent>, AgentError> {
+fn parse_tool_stream_event(data: &str) -> Result<Vec<ProviderStreamEvent>, AgentError> {
     match serde_json::from_str::<ToolStreamEvent>(data) {
         Ok(ToolStreamEvent::MessageStart { message }) => {
             Ok(message
                 .usage
-                .map(|u| AnthropicStreamEvent::Usage {
+                .map(|u| ProviderStreamEvent::Usage {
                     input_tokens: u.input_tokens.unwrap_or(0),
                     output_tokens: u.output_tokens.unwrap_or(0),
                 })
@@ -544,40 +508,40 @@ fn parse_tool_stream_event(data: &str) -> Result<Vec<AnthropicStreamEvent>, Agen
                 ToolStreamBlockStart::Thinking => BlockKind::Thinking,
                 ToolStreamBlockStart::Unknown => return Ok(Vec::new()),
             };
-            Ok(vec![AnthropicStreamEvent::BlockStart { index, kind }])
+            Ok(vec![ProviderStreamEvent::BlockStart { index, kind }])
         }
         Ok(ToolStreamEvent::ContentBlockDelta { index, delta }) => Ok(match delta {
             ToolStreamBlockDelta::TextDelta { text } => {
-                vec![AnthropicStreamEvent::TextDelta { index, text }]
+                vec![ProviderStreamEvent::TextDelta { index, text }]
             }
             ToolStreamBlockDelta::InputJsonDelta { partial_json } => {
-                vec![AnthropicStreamEvent::ToolInputDelta { index, partial_json }]
+                vec![ProviderStreamEvent::ToolInputDelta { index, partial_json }]
             }
             ToolStreamBlockDelta::ThinkingDelta { thinking } => {
-                vec![AnthropicStreamEvent::ThinkingDelta { index, text: thinking }]
+                vec![ProviderStreamEvent::ThinkingDelta { index, text: thinking }]
             }
             ToolStreamBlockDelta::SignatureDelta { signature } => {
-                vec![AnthropicStreamEvent::SignatureDelta { index, signature }]
+                vec![ProviderStreamEvent::SignatureDelta { index, signature }]
             }
             ToolStreamBlockDelta::Unknown => Vec::new(),
         }),
         Ok(ToolStreamEvent::ContentBlockStop { index }) => {
-            Ok(vec![AnthropicStreamEvent::BlockStop { index }])
+            Ok(vec![ProviderStreamEvent::BlockStop { index }])
         }
         Ok(ToolStreamEvent::MessageDelta { delta, usage }) => {
             let mut out = Vec::new();
             if let Some(reason) = delta.stop_reason {
-                out.push(AnthropicStreamEvent::StopReason(reason));
+                out.push(ProviderStreamEvent::StopReason(reason));
             }
             if let Some(u) = usage {
-                out.push(AnthropicStreamEvent::Usage {
+                out.push(ProviderStreamEvent::Usage {
                     input_tokens: u.input_tokens.unwrap_or(0),
                     output_tokens: u.output_tokens.unwrap_or(0),
                 });
             }
             Ok(out)
         }
-        Ok(ToolStreamEvent::MessageStop) => Ok(vec![AnthropicStreamEvent::MessageStop]),
+        Ok(ToolStreamEvent::MessageStop) => Ok(vec![ProviderStreamEvent::MessageStop]),
         Ok(ToolStreamEvent::Error { error }) => Err(AgentError::Provider(format!(
             "Anthropic stream error: {}: {}",
             error.kind, error.message

@@ -5,7 +5,7 @@ mod commands;
 
 pub use commands::{Command, ReplOutcome, ReplSession, parse_command};
 
-use agenty_providers::anthropic::AnthropicClient;
+use agenty_providers::ChatClient;
 use agenty_tools::Tool;
 use agenty_core::{
     AgentError, ChatMessage, Config, ContentBlock, StopReason, ToolSpec,
@@ -40,7 +40,7 @@ impl Default for ReplOptions {
 /// Orchestrates a single user-prompt → final-answer query, running any tool
 /// calls the model requests in between.
 pub struct Repl<'a> {
-    client: &'a AnthropicClient,
+    client: &'a ChatClient,
     config: &'a Config,
     tools: Vec<&'a dyn Tool>,
     options: ReplOptions,
@@ -48,7 +48,7 @@ pub struct Repl<'a> {
 
 impl<'a> Repl<'a> {
     pub fn new(
-        client: &'a AnthropicClient,
+        client: &'a ChatClient,
         config: &'a Config,
         tools: Vec<&'a dyn Tool>,
     ) -> Self {
@@ -105,7 +105,7 @@ impl<'a> Repl<'a> {
         )))
     }
 
-    pub fn client(&self) -> &'a AnthropicClient {
+    pub fn client(&self) -> &'a ChatClient {
         self.client
     }
 

@@ -178,6 +178,7 @@ pub enum StopReason {
 pub enum Provider {
     Anthropic,
     OpenAI,
+    Gemini,
 }
 
 // ---------------------------------------------------------------------------
