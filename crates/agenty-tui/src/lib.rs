@@ -153,6 +153,7 @@ const SCROLL_STEP: i32 = 3;
 const PAGE_STEP: i32 = 10;
 
 enum SlashAction {
+    Help,
     Clear,
     Exit,
     Unknown(String),
@@ -320,6 +321,11 @@ async fn event_loop(terminal: &mut Term, repl: Repl<'_>) -> Result<(), AgentErro
 
                 if let Some(action) = dispatch_slash(trimmed) {
                     match action {
+                        SlashAction::Help => {
+                            app.status = Status::Info(
+                                "commands: /help, /clear, /exit — any other input is sent to the model".into(),
+                            );
+                        }
                         SlashAction::Clear => {
                             conversation.clear();
                             app.status = Status::Info("conversation cleared".into());
@@ -357,6 +363,7 @@ fn dispatch_slash(input: &str) -> Option<SlashAction> {
     let rest = input.strip_prefix('/')?;
     let name = rest.split_whitespace().next().unwrap_or("");
     Some(match name {
+        "help" => SlashAction::Help,
         "clear" => SlashAction::Clear,
         "exit" | "quit" => SlashAction::Exit,
         other => SlashAction::Unknown(other.to_string()),
