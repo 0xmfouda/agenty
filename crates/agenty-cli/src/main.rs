@@ -35,6 +35,7 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    let _ = dotenvy::dotenv();
     let cli = Cli::parse();
 
     let result = match cli.prompt.clone() {

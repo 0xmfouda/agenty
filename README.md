@@ -4,7 +4,11 @@
 
 ## CLI
 
-Requires `ANTHROPIC_API_KEY` in your environment.
+Requires `ANTHROPIC_API_KEY`. Set it in your shell environment, or drop a `.env` file in the directory you run `agenty` from:
+
+```
+ANTHROPIC_API_KEY=sk-...
+```
 
 ```bash
 # Interactive TUI (default model: claude-sonnet-4-6)
