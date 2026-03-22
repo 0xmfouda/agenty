@@ -1,7 +1,7 @@
 use std::pin::Pin;
 use std::time::Duration;
 
-use agenty_types::{
+use agenty_core::{
     AgentError, ChatMessage, Config, ContentBlock, Message, Role, StopReason, ToolSpec,
 };
 use eventsource_stream::Eventsource;

@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-pub use agenty_types::{AgentError, ChatMessage, Config};
+pub use agenty_core::{AgentError, ChatMessage, Config};
 
 /// A persisted conversation: config and full tool-aware message history.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -98,7 +98,7 @@ fn serde_err(e: serde_json::Error) -> AgentError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agenty_types::Provider;
+    use agenty_core::Provider;
 
     fn sample_config() -> Config {
         Config {
@@ -118,7 +118,7 @@ mod tests {
         let mut session = Session::new("abc", sample_config());
         session.push_message(ChatMessage::user_text("hi"));
         session.push_message(ChatMessage::assistant(vec![
-            agenty_types::ContentBlock::Text { text: "hello".into() },
+            agenty_core::ContentBlock::Text { text: "hello".into() },
         ]));
         session.save(&path).unwrap();
 

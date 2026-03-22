@@ -1,4 +1,4 @@
-pub use agenty_types::{JsonValue, ToolCall, ToolResult};
+pub use agenty_core::{JsonValue, ToolCall, ToolResult};
 
 mod bash;
 mod list_files;

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-agenty-types     = { path = "../agenty-types" }
+agenty-core      = { path = "../agenty-core" }
 agenty-providers = { path = "../agenty-providers", features = ["anthropic"] }
 agenty-session   = { path = "../agenty-session" }
 agenty-tools     = { path = "../agenty-tools" }

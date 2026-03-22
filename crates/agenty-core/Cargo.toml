@@ -1,5 +1,5 @@
 [package]
-name = "agenty-types"
+name = "agenty-core"
 version.workspace = true
 edition.workspace = true
 

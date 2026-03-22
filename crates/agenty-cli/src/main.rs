@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use agenty_providers::anthropic::AnthropicClient;
 use agenty_repl::Repl;
 use agenty_tools::{BashTool, ListFilesTool, ReadFileTool, Tool, WriteFileTool};
-use agenty_types::{Config, Provider};
+use agenty_core::{Config, Provider};
 use clap::Parser;
 
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
@@ -61,7 +61,7 @@ fn build_config(cli: &Cli) -> Config {
     }
 }
 
-async fn run_headless(cli: &Cli, prompt: &str) -> Result<(), agenty_types::AgentError> {
+async fn run_headless(cli: &Cli, prompt: &str) -> Result<(), agenty_core::AgentError> {
     let config = build_config(cli);
     let client = AnthropicClient::new(None)?;
 
@@ -83,7 +83,7 @@ async fn run_headless(cli: &Cli, prompt: &str) -> Result<(), agenty_types::Agent
     Ok(())
 }
 
-async fn run_tui(cli: &Cli) -> Result<(), agenty_types::AgentError> {
+async fn run_tui(cli: &Cli) -> Result<(), agenty_core::AgentError> {
     let config = build_config(cli);
     let client = AnthropicClient::new(None)?;
 

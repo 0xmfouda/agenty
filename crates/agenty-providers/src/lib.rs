@@ -5,7 +5,7 @@ use std::pin::Pin;
 
 use futures::Stream;
 
-pub use agenty_types::{AgentError, Message};
+pub use agenty_core::{AgentError, Message};
 
 /// A token yielded by a streaming completion.
 pub type Token = String;

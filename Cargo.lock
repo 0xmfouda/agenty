@@ -6,13 +6,22 @@ version = 4
 name = "agenty-cli"
 version = "0.1.0"
 dependencies = [
+ "agenty-core",
  "agenty-providers",
  "agenty-repl",
  "agenty-tools",
  "agenty-tui",
- "agenty-types",
  "clap",
  "tokio",
+]
+
+[[package]]
+name = "agenty-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -26,7 +35,7 @@ dependencies = [
 name = "agenty-providers"
 version = "0.1.0"
 dependencies = [
- "agenty-types",
+ "agenty-core",
  "eventsource-stream",
  "futures",
  "reqwest",
@@ -39,10 +48,10 @@ dependencies = [
 name = "agenty-repl"
 version = "0.1.0"
 dependencies = [
+ "agenty-core",
  "agenty-providers",
  "agenty-session",
  "agenty-tools",
- "agenty-types",
  "serde_json",
  "tempfile",
  "tokio",
@@ -52,7 +61,7 @@ dependencies = [
 name = "agenty-session"
 version = "0.1.0"
 dependencies = [
- "agenty-types",
+ "agenty-core",
  "serde",
  "serde_json",
 ]
@@ -61,7 +70,7 @@ dependencies = [
 name = "agenty-tools"
 version = "0.1.0"
 dependencies = [
- "agenty-types",
+ "agenty-core",
  "serde",
  "serde_json",
  "tempfile",
@@ -71,24 +80,15 @@ dependencies = [
 name = "agenty-tui"
 version = "0.1.0"
 dependencies = [
+ "agenty-core",
  "agenty-providers",
  "agenty-repl",
- "agenty-types",
  "crossterm",
  "futures",
  "futures-util",
  "ratatui",
  "serde_json",
  "tokio",
-]
-
-[[package]]
-name = "agenty-types"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror",
 ]
 
 [[package]]

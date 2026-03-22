@@ -8,7 +8,7 @@
 //! ```
 
 use agenty_providers::anthropic::AnthropicClient;
-use agenty_types::{Config, Message, Provider, Role};
+use agenty_core::{Config, Message, Provider, Role};
 use futures::StreamExt;
 
 const TEST_MODEL: &str = "claude-haiku-4-5-20251001";

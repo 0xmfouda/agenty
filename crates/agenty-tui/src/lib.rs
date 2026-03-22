@@ -9,7 +9,7 @@ use std::io::{self, Stdout};
 
 use agenty_providers::anthropic::{AnthropicStreamEvent, BlockKind};
 use agenty_repl::Repl;
-use agenty_types::{AgentError, ChatMessage, ContentBlock, Role, StopReason};
+use agenty_core::{AgentError, ChatMessage, ContentBlock, Role, StopReason};
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent,
     KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,

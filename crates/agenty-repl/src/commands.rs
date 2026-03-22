@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use agenty_session::Session;
-use agenty_types::{AgentError, ChatMessage};
+use agenty_core::{AgentError, ChatMessage};
 
 use crate::Repl;
 
@@ -127,10 +127,10 @@ impl<'a> ReplSession<'a> {
 mod tests {
     use super::*;
     use agenty_providers::anthropic::AnthropicClient;
-    use agenty_types::{ChatMessage, ContentBlock, Provider};
+    use agenty_core::{ChatMessage, ContentBlock, Provider};
 
-    fn dummy_config() -> agenty_types::Config {
-        agenty_types::Config {
+    fn dummy_config() -> agenty_core::Config {
+        agenty_core::Config {
             model: "test".into(),
             provider: Provider::Anthropic,
             max_tokens: 64,
@@ -147,7 +147,7 @@ mod tests {
 
     fn dummy_session<'a>(
         client: &'a AnthropicClient,
-        config: &'a agenty_types::Config,
+        config: &'a agenty_core::Config,
         dir: &std::path::Path,
     ) -> ReplSession<'a> {
         let repl = Repl::new(client, config, Vec::new());

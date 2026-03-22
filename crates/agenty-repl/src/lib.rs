@@ -7,7 +7,7 @@ pub use commands::{Command, ReplOutcome, ReplSession, parse_command};
 
 use agenty_providers::anthropic::AnthropicClient;
 use agenty_tools::Tool;
-use agenty_types::{
+use agenty_core::{
     AgentError, ChatMessage, Config, ContentBlock, StopReason, ToolSpec,
 };
 

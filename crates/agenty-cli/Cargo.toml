@@ -8,7 +8,7 @@ name = "agenty"
 path = "src/main.rs"
 
 [dependencies]
-agenty-types     = { path = "../agenty-types" }
+agenty-core      = { path = "../agenty-core" }
 agenty-providers = { path = "../agenty-providers", features = ["anthropic"] }
 agenty-repl      = { path = "../agenty-repl" }
 agenty-tui       = { path = "../agenty-tui" }

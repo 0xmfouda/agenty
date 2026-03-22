@@ -9,7 +9,7 @@
 use agenty_providers::anthropic::AnthropicClient;
 use agenty_repl::Repl;
 use agenty_tools::{ListFilesTool, Tool};
-use agenty_types::{ChatMessage, Config, ContentBlock, Provider};
+use agenty_core::{ChatMessage, Config, ContentBlock, Provider};
 
 const TEST_MODEL: &str = "claude-haiku-4-5-20251001";
 
