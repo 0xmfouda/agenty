@@ -6,10 +6,10 @@ use agenty_providers::anthropic::AnthropicClient;
 use agenty_providers::gemini::GeminiClient;
 use agenty_providers::openai::OpenAIClient;
 use agenty_repl::Repl;
-use agenty_tools::{BashTool, ListFilesTool, ReadFileTool, Tool, WriteFileTool};
+use agenty_tools::{BashTool, ListFilesTool, ReadFileTool, Tool, WebSearchTool, WriteFileTool};
 use clap::{Parser, ValueEnum};
 
-const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
+const DEFAULT_ANTHROPIC_MODEL: &str = "claude-haiku-4-5-20251001";
 const DEFAULT_OPENAI_MODEL: &str = "gpt-4o-mini";
 const DEFAULT_GEMINI_MODEL: &str = "gemini-2.0-flash";
 
@@ -115,7 +115,8 @@ async fn run_headless(cli: &Cli, prompt: &str) -> Result<(), AgentError> {
     let read = ReadFileTool;
     let write = WriteFileTool;
     let list = ListFilesTool;
-    let tools: Vec<&dyn Tool> = vec![&bash, &read, &write, &list];
+    let search = WebSearchTool;
+    let tools: Vec<&dyn Tool> = vec![&bash, &read, &write, &list, &search];
 
     let repl = Repl::new(&client, &config, tools);
     let conversation = repl.run(prompt).await?;
@@ -137,7 +138,8 @@ async fn run_tui(cli: &Cli) -> Result<(), AgentError> {
     let read = ReadFileTool;
     let write = WriteFileTool;
     let list = ListFilesTool;
-    let tools: Vec<&dyn Tool> = vec![&bash, &read, &write, &list];
+    let search = WebSearchTool;
+    let tools: Vec<&dyn Tool> = vec![&bash, &read, &write, &list, &search];
 
     let repl = Repl::new(&client, &config, tools);
     agenty_tui::run(repl).await
