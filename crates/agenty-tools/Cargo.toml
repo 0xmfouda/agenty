@@ -5,10 +5,11 @@ edition.workspace = true
 
 [dependencies]
 agenty-core = { path = "../agenty-core" }
+agenty-memory = { path = "../agenty-memory" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 scraper = "0.21"
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt", "io-util", "time"] }
 serde_json = "1"
 
 [dev-dependencies]

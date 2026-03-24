@@ -1,12 +1,16 @@
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
 
 use agenty_core::{AgentError, Config, Provider};
+use agenty_memory::MemoryStore;
 use agenty_providers::ChatClient;
 use agenty_providers::anthropic::AnthropicClient;
 use agenty_providers::gemini::GeminiClient;
 use agenty_providers::openai::OpenAIClient;
 use agenty_repl::Repl;
-use agenty_tools::{BashTool, ListFilesTool, ReadFileTool, Tool, WebSearchTool, WriteFileTool};
+use agenty_tools::{
+    BashTool, ListFilesTool, MemoryTool, ReadFileTool, Tool, WebSearchTool, WriteFileTool,
+};
 use clap::{Parser, ValueEnum};
 
 const DEFAULT_ANTHROPIC_MODEL: &str = "claude-haiku-4-5-20251001";
@@ -99,6 +103,18 @@ fn build_config(cli: &Cli) -> Config {
     }
 }
 
+fn build_memory_store() -> Result<Arc<Mutex<MemoryStore>>, AgentError> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| AgentError::Config("cannot determine home directory".into()))?;
+    let path = std::path::PathBuf::from(home)
+        .join(".agenty")
+        .join("memory");
+    let store = MemoryStore::open(&path)
+        .map_err(|e| AgentError::Config(format!("failed to open memory store: {e}")))?;
+    Ok(Arc::new(Mutex::new(store)))
+}
+
 fn build_client(provider: ProviderArg) -> Result<ChatClient, AgentError> {
     Ok(match provider {
         ProviderArg::Anthropic => ChatClient::Anthropic(AnthropicClient::new(None)?),
@@ -110,13 +126,15 @@ fn build_client(provider: ProviderArg) -> Result<ChatClient, AgentError> {
 async fn run_headless(cli: &Cli, prompt: &str) -> Result<(), AgentError> {
     let config = build_config(cli);
     let client = build_client(cli.provider)?;
+    let memory_store = build_memory_store()?;
 
     let bash = BashTool;
     let read = ReadFileTool;
     let write = WriteFileTool;
     let list = ListFilesTool;
     let search = WebSearchTool;
-    let tools: Vec<&dyn Tool> = vec![&bash, &read, &write, &list, &search];
+    let mem = MemoryTool::new(memory_store);
+    let tools: Vec<&dyn Tool> = vec![&bash, &read, &write, &list, &search, &mem];
 
     let repl = Repl::new(&client, &config, tools);
     let conversation = repl.run(prompt).await?;
@@ -133,13 +151,15 @@ async fn run_headless(cli: &Cli, prompt: &str) -> Result<(), AgentError> {
 async fn run_tui(cli: &Cli) -> Result<(), AgentError> {
     let config = build_config(cli);
     let client = build_client(cli.provider)?;
+    let memory_store = build_memory_store()?;
 
     let bash = BashTool;
     let read = ReadFileTool;
     let write = WriteFileTool;
     let list = ListFilesTool;
     let search = WebSearchTool;
-    let tools: Vec<&dyn Tool> = vec![&bash, &read, &write, &list, &search];
+    let mem = MemoryTool::new(memory_store);
+    let tools: Vec<&dyn Tool> = vec![&bash, &read, &write, &list, &search, &mem];
 
     let repl = Repl::new(&client, &config, tools);
     agenty_tui::run(repl).await

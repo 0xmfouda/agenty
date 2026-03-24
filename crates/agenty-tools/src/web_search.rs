@@ -67,7 +67,9 @@ fn scrape_duckduckgo(query: &str, max_results: usize) -> Result<Vec<SearchResult
     // Run the async reqwest call on a dedicated thread to avoid
     // "cannot drop a runtime inside an async context" panics.
     let body = std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new()
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
             .map_err(|e| format!("failed to create runtime: {e}"))?;
         rt.block_on(async {
             let client = reqwest::Client::builder()

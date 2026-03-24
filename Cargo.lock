@@ -7,6 +7,7 @@ name = "agenty-cli"
 version = "0.1.0"
 dependencies = [
  "agenty-core",
+ "agenty-memory",
  "agenty-providers",
  "agenty-repl",
  "agenty-tools",
@@ -23,6 +24,15 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "agenty-memory"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -72,6 +82,7 @@ name = "agenty-tools"
 version = "0.1.0"
 dependencies = [
  "agenty-core",
+ "agenty-memory",
  "reqwest",
  "scraper",
  "serde",

@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 agenty-core      = { path = "../agenty-core" }
+agenty-memory    = { path = "../agenty-memory" }
 agenty-providers = { path = "../agenty-providers", features = ["anthropic", "openai"] }
 agenty-repl      = { path = "../agenty-repl" }
 agenty-tui       = { path = "../agenty-tui" }

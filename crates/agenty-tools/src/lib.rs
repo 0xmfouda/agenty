@@ -2,12 +2,14 @@ pub use agenty_core::{JsonValue, ToolCall, ToolResult};
 
 mod bash;
 mod list_files;
+mod memory;
 mod read_file;
 mod web_search;
 mod write_file;
 
 pub use bash::BashTool;
 pub use list_files::ListFilesTool;
+pub use memory::MemoryTool;
 pub use read_file::ReadFileTool;
 pub use web_search::WebSearchTool;
 pub use write_file::WriteFileTool;
