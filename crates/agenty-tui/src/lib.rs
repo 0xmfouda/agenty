@@ -1,18 +1,14 @@
 //! Interactive TUI renderer wired to the `agenty-repl` query loop.
-//!
-//! Layout, palette and message-box styling follow `UI.md` at the workspace
-//! root. The UI is a scrollable stack of bordered message boxes on top, a
-//! 3-row input bar, and a 1-row status bar.
 
 use std::collections::BTreeMap;
 use std::io::{self, Stdout};
 
+use agenty_core::{AgentError, ChatMessage, ContentBlock, Role, StopReason};
 use agenty_providers::{BlockKind, ProviderStreamEvent};
 use agenty_repl::Repl;
-use agenty_core::{AgentError, ChatMessage, ContentBlock, Role, StopReason};
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent,
-    KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -89,7 +85,11 @@ fn init_terminal() -> io::Result<Term> {
 
 fn restore_terminal(terminal: &mut Term) -> io::Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), DisableMouseCapture, LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     Ok(())
 }
@@ -106,6 +106,13 @@ enum Status {
     Error(String),
 }
 
+struct TabComplete {
+    /// Matching candidates for the prefix.
+    matches: Vec<String>,
+    /// Current index into `matches` (cycles on repeated Tab).
+    index: usize,
+}
+
 struct AppState {
     input: String,
     status: Status,
@@ -120,13 +127,17 @@ struct AppState {
     /// Monotonic counter bumped on each ~100ms tick during streaming; used to
     /// select the current frame of the "thinking..." spinner animation.
     anim_tick: u64,
+    /// Words available for tab-completion (slash commands + tool names).
+    completions: Vec<String>,
+    /// Active tab-completion session (None when not completing).
+    tab: Option<TabComplete>,
 }
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const THINKING_DOTS: &[&str] = &["", ".", "..", "..."];
 
 impl AppState {
-    fn new(model: String) -> Self {
+    fn new(model: String, completions: Vec<String>) -> Self {
         Self {
             input: String::new(),
             status: Status::Idle,
@@ -137,6 +148,8 @@ impl AppState {
             output_tokens: 0,
             last_output: 0,
             anim_tick: 0,
+            completions,
+            tab: None,
         }
     }
 }
@@ -162,8 +175,15 @@ enum SlashAction {
 // Per-block streaming buffer, keyed by the block index.
 enum StreamingBlock {
     Text(String),
-    Thinking { text: String, signature: String },
-    ToolUse { id: String, name: String, partial_json: String },
+    Thinking {
+        text: String,
+        signature: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        partial_json: String,
+    },
 }
 
 struct StreamingState {
@@ -173,7 +193,10 @@ struct StreamingState {
 
 impl StreamingState {
     fn new() -> Self {
-        Self { active: false, blocks: BTreeMap::new() }
+        Self {
+            active: false,
+            blocks: BTreeMap::new(),
+        }
     }
 
     fn start(&mut self) {
@@ -209,8 +232,7 @@ impl StreamingState {
                 }
             }
             ProviderStreamEvent::ThinkingDelta { index, text } => {
-                if let Some(StreamingBlock::Thinking { text: buf, .. }) =
-                    self.blocks.get_mut(index)
+                if let Some(StreamingBlock::Thinking { text: buf, .. }) = self.blocks.get_mut(index)
                 {
                     buf.push_str(text);
                 }
@@ -222,9 +244,13 @@ impl StreamingState {
                     buf.push_str(signature);
                 }
             }
-            ProviderStreamEvent::ToolInputDelta { index, partial_json } => {
-                if let Some(StreamingBlock::ToolUse { partial_json: buf, .. }) =
-                    self.blocks.get_mut(index)
+            ProviderStreamEvent::ToolInputDelta {
+                index,
+                partial_json,
+            } => {
+                if let Some(StreamingBlock::ToolUse {
+                    partial_json: buf, ..
+                }) = self.blocks.get_mut(index)
                 {
                     buf.push_str(partial_json);
                 }
@@ -236,8 +262,6 @@ impl StreamingState {
         }
     }
 
-    /// Is any thinking block currently receiving deltas (or present at all
-    /// during this turn)? Used to drive the status-bar spinner.
     fn has_thinking(&self) -> bool {
         self.blocks
             .values()
@@ -248,9 +272,7 @@ impl StreamingState {
         self.blocks
             .values()
             .filter_map(|b| match b {
-                StreamingBlock::Text(text) => {
-                    Some(ContentBlock::Text { text: text.clone() })
-                }
+                StreamingBlock::Text(text) => Some(ContentBlock::Text { text: text.clone() }),
                 StreamingBlock::Thinking { text, signature } => {
                     if text.is_empty() {
                         None
@@ -261,12 +283,15 @@ impl StreamingState {
                         })
                     }
                 }
-                StreamingBlock::ToolUse { id, name, partial_json } => {
+                StreamingBlock::ToolUse {
+                    id,
+                    name,
+                    partial_json,
+                } => {
                     let input = if partial_json.is_empty() {
                         serde_json::Value::Object(serde_json::Map::new())
                     } else {
-                        serde_json::from_str(partial_json)
-                            .unwrap_or(serde_json::Value::Null)
+                        serde_json::from_str(partial_json).unwrap_or(serde_json::Value::Null)
                     };
                     Some(ContentBlock::ToolUse {
                         id: id.clone(),
@@ -284,7 +309,14 @@ impl StreamingState {
 // ---------------------------------------------------------------------------
 
 async fn event_loop(terminal: &mut Term, repl: Repl<'_>) -> Result<(), AgentError> {
-    let mut app = AppState::new(repl.config().model.clone());
+    let mut completions: Vec<String> = vec![
+        "/help".into(),
+        "/clear".into(),
+        "/exit".into(),
+        "/checkpoint".into(),
+    ];
+    completions.extend(repl.tool_specs().iter().map(|s| s.name.clone()));
+    let mut app = AppState::new(repl.config().model.clone(), completions);
     let mut events = EventStream::new();
     let mut conversation: Vec<ChatMessage> = Vec::new();
     let mut streaming = StreamingState::new();
@@ -292,14 +324,21 @@ async fn event_loop(terminal: &mut Term, repl: Repl<'_>) -> Result<(), AgentErro
 
     loop {
         terminal
-            .draw(|f| draw(f, &conversation, &streaming, &mut app, error_banner.as_deref()))
+            .draw(|f| {
+                draw(
+                    f,
+                    &conversation,
+                    &streaming,
+                    &mut app,
+                    error_banner.as_deref(),
+                )
+            })
             .map_err(io_err)?;
 
         let Some(event) = events.next().await else {
             return Ok(());
         };
-        let event =
-            event.map_err(|e| AgentError::Other(format!("terminal event error: {e}")))?;
+        let event = event.map_err(|e| AgentError::Other(format!("terminal event error: {e}")))?;
 
         let action = match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => handle_key(key, &mut app),
@@ -410,7 +449,9 @@ async fn run_agent_loop(
         conversation.push(ChatMessage::user(tool_results));
     }
 
-    Err(AgentError::Other(format!("agent exceeded max turns = {MAX_TURNS}")))
+    Err(AgentError::Other(format!(
+        "agent exceeded max turns = {MAX_TURNS}"
+    )))
 }
 
 async fn stream_one_turn(
@@ -530,6 +571,7 @@ fn handle_key(key: KeyEvent, app: &mut AppState) -> KeyAction {
             KeyCode::Char('c') | KeyCode::Char('d') => return KeyAction::Quit,
             KeyCode::Char('u') => {
                 app.input.clear();
+                app.tab = None;
                 return KeyAction::None;
             }
             KeyCode::Char('b') => return KeyAction::ScrollBy(PAGE_STEP),
@@ -538,6 +580,10 @@ fn handle_key(key: KeyEvent, app: &mut AppState) -> KeyAction {
         }
     }
     match key.code {
+        KeyCode::Tab => {
+            handle_tab(app);
+            KeyAction::None
+        }
         KeyCode::Esc => KeyAction::Quit,
         KeyCode::PageUp => KeyAction::ScrollBy(PAGE_STEP),
         KeyCode::PageDown => KeyAction::ScrollBy(-PAGE_STEP),
@@ -550,21 +596,60 @@ fn handle_key(key: KeyEvent, app: &mut AppState) -> KeyAction {
         KeyCode::Home => KeyAction::ScrollBy(i32::MAX),
         KeyCode::End => KeyAction::ScrollToBottom,
         KeyCode::Enter => {
+            app.tab = None;
             if app.input.trim().is_empty() {
                 return KeyAction::None;
             }
             KeyAction::Submit(std::mem::take(&mut app.input))
         }
         KeyCode::Char(c) => {
+            app.tab = None;
             app.input.push(c);
             KeyAction::None
         }
         KeyCode::Backspace => {
+            app.tab = None;
             app.input.pop();
             KeyAction::None
         }
         _ => KeyAction::None,
     }
+}
+
+fn handle_tab(app: &mut AppState) {
+    if let Some(ref mut tab) = app.tab {
+        // Already completing — cycle to next match.
+        tab.index = (tab.index + 1) % tab.matches.len();
+        app.input = tab.matches[tab.index].clone();
+        return;
+    }
+
+    // Start a new completion session. Match against the last whitespace-
+    // delimited token so completions work mid-sentence too.
+    let input = app.input.clone();
+    let (before, word) = match input.rfind(char::is_whitespace) {
+        Some(pos) => (&input[..=pos], &input[pos + 1..]),
+        None => ("", input.as_str()),
+    };
+
+    if word.is_empty() {
+        return;
+    }
+
+    let word_lower = word.to_ascii_lowercase();
+    let matches: Vec<String> = app
+        .completions
+        .iter()
+        .filter(|c| c.to_ascii_lowercase().starts_with(&word_lower) && c.len() > word.len())
+        .map(|c| format!("{before}{c}"))
+        .collect();
+
+    if matches.is_empty() {
+        return;
+    }
+
+    app.input = matches[0].clone();
+    app.tab = Some(TabComplete { matches, index: 0 });
 }
 
 fn handle_mouse(ev: MouseEvent) -> Option<KeyAction> {
@@ -577,7 +662,9 @@ fn handle_mouse(ev: MouseEvent) -> Option<KeyAction> {
 
 fn apply_scroll(app: &mut AppState, delta: i32) {
     if delta >= 0 {
-        app.scroll_offset = app.scroll_offset.saturating_add(delta.min(u16::MAX as i32) as u16);
+        app.scroll_offset = app
+            .scroll_offset
+            .saturating_add(delta.min(u16::MAX as i32) as u16);
     } else {
         let d = (-delta).min(u16::MAX as i32) as u16;
         app.scroll_offset = app.scroll_offset.saturating_sub(d);
@@ -601,7 +688,11 @@ fn draw(
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(3), Constraint::Length(1)])
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(3),
+            Constraint::Length(1),
+        ])
         .split(f.area());
 
     render_messages(f, chunks[0], conversation, streaming, app, error_banner);
@@ -630,10 +721,9 @@ fn render_messages(
     }
 
     let gap: u16 = 1;
-    let heights: Vec<u16> =
-        boxes.iter().map(|b| b.outer_height(area.width)).collect();
-    let boxes_total: u16 = heights.iter().copied().sum::<u16>()
-        + gap * heights.len().saturating_sub(1) as u16;
+    let heights: Vec<u16> = boxes.iter().map(|b| b.outer_height(area.width)).collect();
+    let boxes_total: u16 =
+        heights.iter().copied().sum::<u16>() + gap * heights.len().saturating_sub(1) as u16;
 
     // The ASCII banner is always kept at the top of the scroll stack so
     // scrolling up past the oldest message reveals it.
@@ -650,7 +740,12 @@ fn render_messages(
         let mut y = origin_y;
         if banner_height > 0 {
             y = y.saturating_add(banner_top_pad);
-            let rect = Rect { x: origin_x, y, width: area.width, height: banner_height };
+            let rect = Rect {
+                x: origin_x,
+                y,
+                width: area.width,
+                height: banner_height,
+            };
             Paragraph::new(banner_lines.clone())
                 .alignment(Alignment::Center)
                 .style(Style::default().bg(theme::BG))
@@ -658,7 +753,12 @@ fn render_messages(
             y = y.saturating_add(banner_height + banner_gap);
         }
         for (i, b) in boxes.iter().enumerate() {
-            let rect = Rect { x: origin_x, y, width: area.width, height: heights[i] };
+            let rect = Rect {
+                x: origin_x,
+                y,
+                width: area.width,
+                height: heights[i],
+            };
             b.render(buf, rect);
             y = y.saturating_add(heights[i] + gap);
         }
@@ -691,21 +791,27 @@ fn render_messages(
         for col in 0..area.width {
             let src_pos = (col, src_start_y + row);
             let dst_pos = (area.x + col, area.y + row);
-            if let (Some(src), Some(dst)) =
-                (off.cell(src_pos), frame_buf.cell_mut(dst_pos))
-            {
+            if let (Some(src), Some(dst)) = (off.cell(src_pos), frame_buf.cell_mut(dst_pos)) {
                 *dst = src.clone();
             }
         }
     }
 
     if app.scroll_offset > 0 {
-        let hint = format!(" ↑ scrolled {} rows · End to jump to bottom ", app.scroll_offset);
+        let hint = format!(
+            " ↑ scrolled {} rows · End to jump to bottom ",
+            app.scroll_offset
+        );
         let hint_w = hint.chars().count() as u16;
         if hint_w + 2 <= area.width {
             let x = area.x + area.width - hint_w - 1;
             let y = area.y;
-            let rect = Rect { x, y, width: hint_w, height: 1 };
+            let rect = Rect {
+                x,
+                y,
+                width: hint_w,
+                height: 1,
+            };
             Paragraph::new(Line::from(Span::styled(
                 hint,
                 Style::default().fg(theme::PURPLE_LIGHT).bg(theme::BG),
@@ -846,8 +952,7 @@ impl MessageBox {
                 " ".to_string(),
                 Style::default().bg(theme::BG),
             ));
-            block = block
-                .title_bottom(Line::from(spans).alignment(Alignment::Right));
+            block = block.title_bottom(Line::from(spans).alignment(Alignment::Right));
         }
 
         Paragraph::new(self.lines.clone())
@@ -883,14 +988,14 @@ fn build_boxes(
                 StreamingBlock::Thinking { text, .. } if !text.is_empty() => {
                     boxes.push(streaming_thinking_box(text, anim_tick));
                 }
-                StreamingBlock::ToolUse { name, partial_json, .. } => {
+                StreamingBlock::ToolUse {
+                    name, partial_json, ..
+                } => {
                     let input = if partial_json.is_empty() {
                         serde_json::Value::Object(Default::default())
                     } else {
                         serde_json::from_str(partial_json)
-                            .unwrap_or_else(|_| {
-                                serde_json::Value::String(partial_json.clone())
-                            })
+                            .unwrap_or_else(|_| serde_json::Value::String(partial_json.clone()))
                     };
                     boxes.push(tool_call_box(name, &input, true));
                 }
@@ -916,7 +1021,9 @@ fn flush_user(msg: &ChatMessage, boxes: &mut Vec<MessageBox>) {
                 }
                 text_buf.push_str(text);
             }
-            ContentBlock::ToolResult { content, is_error, .. } => {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
                 if !text_buf.is_empty() {
                     boxes.push(user_box(&text_buf));
                     text_buf.clear();
@@ -1257,11 +1364,10 @@ fn count_marker(chars: &[char], from: usize, marker: char) -> usize {
 /// An opener must be preceded by start-of-line, whitespace, or punctuation —
 /// and followed by a non-whitespace character (otherwise `*` is just an asterisk).
 fn can_open_emphasis(chars: &[char], i: usize) -> bool {
-    let prev_ok = i == 0
-        || {
-            let p = chars[i - 1];
-            p.is_whitespace() || "([{\"'`~—-".contains(p)
-        };
+    let prev_ok = i == 0 || {
+        let p = chars[i - 1];
+        p.is_whitespace() || "([{\"'`~—-".contains(p)
+    };
     let marker = chars[i];
     let run = count_marker(chars, i, marker);
     let next = chars.get(i + run).copied();
@@ -1274,12 +1380,7 @@ fn can_open_emphasis(chars: &[char], i: usize) -> bool {
 
 /// Look for a closing marker run of exactly `run` marker chars. The closer
 /// must be preceded by a non-whitespace character.
-fn find_closing_marker(
-    chars: &[char],
-    from: usize,
-    marker: char,
-    run: usize,
-) -> Option<usize> {
+fn find_closing_marker(chars: &[char], from: usize, marker: char, run: usize) -> Option<usize> {
     let mut i = from;
     while i < chars.len() {
         if chars[i] == '\\' && i + 1 < chars.len() {
@@ -1302,18 +1403,21 @@ fn find_closing_marker(
 }
 
 const RUST_KEYWORDS: &[&str] = &[
-    "as", "async", "await", "break", "const", "continue", "crate", "dyn",
-    "else", "enum", "extern", "false", "fn", "for", "if", "impl", "in", "let",
-    "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "self",
-    "Self", "static", "struct", "super", "trait", "true", "type", "unsafe",
-    "use", "where", "while",
+    "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern",
+    "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub",
+    "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true", "type",
+    "unsafe", "use", "where", "while",
 ];
 
 fn highlight_code_line(line: &str) -> Line<'static> {
     let base = Style::default().fg(theme::FG).bg(theme::SURFACE);
-    let kw = Style::default().fg(Color::Rgb(0xc0, 0x84, 0xfc)).bg(theme::SURFACE);
+    let kw = Style::default()
+        .fg(Color::Rgb(0xc0, 0x84, 0xfc))
+        .bg(theme::SURFACE);
     let string = Style::default().fg(theme::GREEN_LIGHT).bg(theme::SURFACE);
-    let number = Style::default().fg(Color::Rgb(0xfb, 0x92, 0x3c)).bg(theme::SURFACE);
+    let number = Style::default()
+        .fg(Color::Rgb(0xfb, 0x92, 0x3c))
+        .bg(theme::SURFACE);
     let comment = Style::default()
         .fg(theme::DIM)
         .bg(theme::SURFACE)
@@ -1363,7 +1467,11 @@ fn highlight_code_line(line: &str) -> Line<'static> {
                 i += 1;
             }
             let word: String = chars[start..i].iter().collect();
-            let style = if RUST_KEYWORDS.contains(&word.as_str()) { kw } else { base };
+            let style = if RUST_KEYWORDS.contains(&word.as_str()) {
+                kw
+            } else {
+                base
+            };
             spans.push(Span::styled(word, style));
             continue;
         }
@@ -1393,6 +1501,23 @@ fn highlight_code_line(line: &str) -> Line<'static> {
 // Input bar
 // ---------------------------------------------------------------------------
 
+/// Return the suffix of the first matching completion, for ghost-text display.
+fn inline_hint(input: &str, completions: &[String]) -> String {
+    let (_, word) = match input.rfind(char::is_whitespace) {
+        Some(pos) => (&input[..=pos], &input[pos + 1..]),
+        None => ("", input),
+    };
+    if word.is_empty() {
+        return String::new();
+    }
+    let word_lower = word.to_ascii_lowercase();
+    completions
+        .iter()
+        .find(|c| c.to_ascii_lowercase().starts_with(&word_lower) && c.len() > word.len())
+        .map(|c| c[word.len()..].to_string())
+        .unwrap_or_default()
+}
+
 fn render_input(f: &mut Frame, area: Rect, app: &AppState) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1412,11 +1537,17 @@ fn render_input(f: &mut Frame, area: Rect, app: &AppState) {
         app.input.clone(),
         Style::default().fg(theme::FG_BRIGHT).bg(theme::BG),
     );
-    let cursor = Span::styled(
-        "█",
-        Style::default().fg(theme::FG_BRIGHT).bg(theme::BG),
-    );
-    let line = Line::from(vec![prompt, text, cursor]);
+    let cursor = Span::styled("█", Style::default().fg(theme::FG_BRIGHT).bg(theme::BG));
+
+    // Show a dim inline hint for the first tab-completion candidate.
+    let hint = if app.tab.is_none() {
+        inline_hint(&app.input, &app.completions)
+    } else {
+        String::new()
+    };
+    let hint_span = Span::styled(hint, Style::default().fg(theme::DIM).bg(theme::BG));
+
+    let line = Line::from(vec![prompt, text, cursor, hint_span]);
     Paragraph::new(line)
         .style(Style::default().bg(theme::BG))
         .render(inner, f.buffer_mut());
@@ -1434,7 +1565,11 @@ fn render_status(
     conversation: &[ChatMessage],
 ) {
     let model_chip = format!(" {} ", app.model);
-    let conn = if app.connected { " ● connected " } else { " ● offline   " };
+    let conn = if app.connected {
+        " ● connected "
+    } else {
+        " ● offline   "
+    };
     let conn_style = if app.connected {
         Style::default().fg(theme::GREEN).bg(theme::STATUS_BG)
     } else {
@@ -1456,12 +1591,10 @@ fn render_status(
     };
     let status_style = match &app.status {
         Status::Idle | Status::Info(_) => Style::default().fg(theme::DIM).bg(theme::STATUS_BG),
-        Status::Streaming if thinking => {
-            Style::default()
-                .fg(theme::PURPLE_LIGHT)
-                .bg(theme::STATUS_BG)
-                .add_modifier(Modifier::BOLD)
-        }
+        Status::Streaming if thinking => Style::default()
+            .fg(theme::PURPLE_LIGHT)
+            .bg(theme::STATUS_BG)
+            .add_modifier(Modifier::BOLD),
         Status::Streaming | Status::RunningTools => {
             Style::default().fg(theme::AMBER).bg(theme::STATUS_BG)
         }
@@ -1481,9 +1614,7 @@ fn render_status(
         + conn.chars().count() as u16
         + status_text.chars().count() as u16;
     let right_width = right_text.chars().count() as u16;
-    let pad = area
-        .width
-        .saturating_sub(left_width + right_width) as usize;
+    let pad = area.width.saturating_sub(left_width + right_width) as usize;
 
     let line = Line::from(vec![
         Span::styled(
@@ -1495,13 +1626,12 @@ fn render_status(
         ),
         Span::styled(conn.to_string(), conn_style),
         Span::styled(status_text, status_style),
-        Span::styled(
-            " ".repeat(pad),
-            Style::default().bg(theme::STATUS_BG),
-        ),
+        Span::styled(" ".repeat(pad), Style::default().bg(theme::STATUS_BG)),
         Span::styled(
             right_text,
-            Style::default().fg(theme::PURPLE_LIGHT).bg(theme::STATUS_BG),
+            Style::default()
+                .fg(theme::PURPLE_LIGHT)
+                .bg(theme::STATUS_BG),
         ),
     ]);
 
