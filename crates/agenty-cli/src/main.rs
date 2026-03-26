@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use agenty_core::{AgentError, Config, Provider};
 use agenty_memory::MemoryStore;
+use agenty_plugins::PluginRegistry;
 use agenty_providers::ChatClient;
 use agenty_providers::anthropic::AnthropicClient;
 use agenty_providers::gemini::GeminiClient;
@@ -45,6 +46,10 @@ struct Cli {
     /// Anthropic-only; ignored for other providers.
     #[arg(long, value_name = "BUDGET")]
     thinking: Option<u32>,
+
+    /// Directory to scan for plugins (default: ~/.agenty/plugins).
+    #[arg(long, value_name = "DIR")]
+    plugins_dir: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -115,6 +120,32 @@ fn build_memory_store() -> Result<Arc<Mutex<MemoryStore>>, AgentError> {
     Ok(Arc::new(Mutex::new(store)))
 }
 
+fn build_plugin_registry(cli: &Cli) -> PluginRegistry {
+    let mut registry = PluginRegistry::new();
+
+    let plugins_dir = match &cli.plugins_dir {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => {
+            let home = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .unwrap_or_default();
+            std::path::PathBuf::from(home)
+                .join(".agenty")
+                .join("plugins")
+        }
+    };
+
+    if plugins_dir.is_dir() {
+        match registry.discover(&plugins_dir) {
+            Ok(n) if n > 0 => eprintln!("loaded {n} plugin(s) from {}", plugins_dir.display()),
+            Ok(_) => {}
+            Err(e) => eprintln!("warning: plugin discovery failed: {e}"),
+        }
+    }
+
+    registry
+}
+
 fn build_client(provider: ProviderArg) -> Result<ChatClient, AgentError> {
     Ok(match provider {
         ProviderArg::Anthropic => ChatClient::Anthropic(AnthropicClient::new(None)?),
@@ -127,6 +158,7 @@ async fn run_headless(cli: &Cli, prompt: &str) -> Result<(), AgentError> {
     let config = build_config(cli);
     let client = build_client(cli.provider)?;
     let memory_store = build_memory_store()?;
+    let registry = build_plugin_registry(cli);
 
     let bash = BashTool;
     let read = ReadFileTool;
@@ -134,7 +166,10 @@ async fn run_headless(cli: &Cli, prompt: &str) -> Result<(), AgentError> {
     let list = ListFilesTool;
     let search = WebSearchTool;
     let mem = MemoryTool::new(memory_store);
-    let tools: Vec<&dyn Tool> = vec![&bash, &read, &write, &list, &search, &mem];
+    let mut tools: Vec<&dyn Tool> = vec![&bash, &read, &write, &list, &search, &mem];
+
+    let plugin_tools = registry.tools();
+    tools.extend(&plugin_tools);
 
     let repl = Repl::new(&client, &config, tools);
     let conversation = repl.run(prompt).await?;
@@ -152,6 +187,7 @@ async fn run_tui(cli: &Cli) -> Result<(), AgentError> {
     let config = build_config(cli);
     let client = build_client(cli.provider)?;
     let memory_store = build_memory_store()?;
+    let registry = build_plugin_registry(cli);
 
     let bash = BashTool;
     let read = ReadFileTool;
@@ -159,7 +195,10 @@ async fn run_tui(cli: &Cli) -> Result<(), AgentError> {
     let list = ListFilesTool;
     let search = WebSearchTool;
     let mem = MemoryTool::new(memory_store);
-    let tools: Vec<&dyn Tool> = vec![&bash, &read, &write, &list, &search, &mem];
+    let mut tools: Vec<&dyn Tool> = vec![&bash, &read, &write, &list, &search, &mem];
+
+    let plugin_tools = registry.tools();
+    tools.extend(&plugin_tools);
 
     let repl = Repl::new(&client, &config, tools);
     agenty_tui::run(repl).await
