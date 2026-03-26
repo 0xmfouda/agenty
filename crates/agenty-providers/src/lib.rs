@@ -1,8 +1,4 @@
 //! Provider abstraction over chat/completions backends.
-//!
-//! Concrete backends (Anthropic, OpenAI) implement the same surface exposed by
-//! [`ChatClient`]: a non-streaming tool-aware request and a streaming
-//! tool-aware request that yields [`ProviderStreamEvent`]s.
 
 #[cfg(feature = "anthropic")]
 pub mod anthropic;
@@ -10,19 +6,22 @@ pub mod anthropic;
 pub mod gemini;
 #[cfg(feature = "openai")]
 pub mod openai;
+#[cfg(any(feature = "anthropic", feature = "openai", feature = "gemini"))]
+pub mod rate_limit;
 
 use std::pin::Pin;
 
 use futures::Stream;
 
-pub use agenty_core::{AgentError, ChatMessage, Config, ContentBlock, Message, StopReason, ToolSpec};
+pub use agenty_core::{
+    AgentError, ChatMessage, Config, ContentBlock, Message, StopReason, ToolSpec,
+};
 
 /// A token yielded by a streaming completion.
 pub type Token = String;
 
 /// A pinned, heap-allocated token stream.
-pub type TokenStream<'a> =
-    Pin<Box<dyn Stream<Item = Result<Token, AgentError>> + Send + 'a>>;
+pub type TokenStream<'a> = Pin<Box<dyn Stream<Item = Result<Token, AgentError>> + Send + 'a>>;
 
 // ---------------------------------------------------------------------------
 // Unified response / event types
@@ -44,23 +43,39 @@ pub enum BlockKind {
 }
 
 /// A single decoded event from a streaming provider response.
-///
-/// The shape is modeled on Anthropic's SSE events; OpenAI's chat-completions
-/// SSE deltas are translated into the same shape so consumers (TUI, REPL) can
-/// treat both backends identically.
 #[derive(Debug, Clone)]
 pub enum ProviderStreamEvent {
-    BlockStart { index: u32, kind: BlockKind },
-    TextDelta { index: u32, text: String },
-    ThinkingDelta { index: u32, text: String },
+    BlockStart {
+        index: u32,
+        kind: BlockKind,
+    },
+    TextDelta {
+        index: u32,
+        text: String,
+    },
+    ThinkingDelta {
+        index: u32,
+        text: String,
+    },
     /// Anthropic-specific: signature that authenticates a thinking block.
     /// Must be echoed back verbatim in follow-up turns when tool use is
     /// involved. OpenAI does not emit this.
-    SignatureDelta { index: u32, signature: String },
-    ToolInputDelta { index: u32, partial_json: String },
-    BlockStop { index: u32 },
+    SignatureDelta {
+        index: u32,
+        signature: String,
+    },
+    ToolInputDelta {
+        index: u32,
+        partial_json: String,
+    },
+    BlockStop {
+        index: u32,
+    },
     StopReason(StopReason),
-    Usage { input_tokens: u32, output_tokens: u32 },
+    Usage {
+        input_tokens: u32,
+        output_tokens: u32,
+    },
     MessageStop,
 }
 
@@ -117,7 +132,48 @@ impl ChatClient {
     }
 }
 
-/// Legacy trait kept for the simple non-tool streaming path used by any
+// ---------------------------------------------------------------------------
+// ChatProvider — trait for anything that can send/stream tool-aware requests
+// ---------------------------------------------------------------------------
+
+/// Abstraction over chat clients (bare or rate-limited).
+pub trait ChatProvider: Send + Sync {
+    fn send_with_tools(
+        &self,
+        config: &Config,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+    ) -> impl std::future::Future<Output = Result<AssistantResponse, AgentError>> + Send;
+
+    fn stream_with_tools(
+        &self,
+        config: &Config,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+    ) -> impl std::future::Future<Output = Result<ProviderEventStream, AgentError>> + Send;
+}
+
+impl ChatProvider for ChatClient {
+    async fn send_with_tools(
+        &self,
+        config: &Config,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+    ) -> Result<AssistantResponse, AgentError> {
+        ChatClient::send_with_tools(self, config, messages, tools).await
+    }
+
+    async fn stream_with_tools(
+        &self,
+        config: &Config,
+        messages: &[ChatMessage],
+        tools: &[ToolSpec],
+    ) -> Result<ProviderEventStream, AgentError> {
+        ChatClient::stream_with_tools(self, config, messages, tools).await
+    }
+}
+
+/// trait kept for the simple non-tool streaming path used by any
 /// caller that wants raw token streams rather than the richer
 /// [`ProviderStreamEvent`] interface.
 pub trait Provider: Send + Sync {

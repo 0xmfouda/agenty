@@ -17,7 +17,7 @@ reqwest             = { version = "0.12", features = ["json", "stream", "rustls-
 eventsource-stream  = { version = "0.2",                                 optional = true }
 serde               = { version = "1",    features = ["derive"],         optional = true }
 serde_json          = { version = "1",                                   optional = true }
-tokio               = { version = "1",    features = ["time"],           optional = true }
+tokio               = { version = "1",    features = ["time", "sync", "rt"],           optional = true }
 
 [dev-dependencies]
 agenty-core = { path = "../agenty-core" }

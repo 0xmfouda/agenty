@@ -8,6 +8,7 @@ use agenty_providers::ChatClient;
 use agenty_providers::anthropic::AnthropicClient;
 use agenty_providers::gemini::GeminiClient;
 use agenty_providers::openai::OpenAIClient;
+use agenty_providers::rate_limit::RateLimitedClient;
 use agenty_repl::Repl;
 use agenty_tools::{
     BashTool, ListFilesTool, MemoryTool, ReadFileTool, Tool, WebSearchTool, WriteFileTool,
@@ -50,6 +51,11 @@ struct Cli {
     /// Directory to scan for plugins (default: ~/.agenty/plugins).
     #[arg(long, value_name = "DIR")]
     plugins_dir: Option<String>,
+
+    /// Rate limit: max requests per minute to the provider (e.g. `--rpm 60`).
+    /// Omit to disable rate limiting.
+    #[arg(long, value_name = "N")]
+    rpm: Option<u32>,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -120,6 +126,14 @@ fn build_memory_store() -> Result<Arc<Mutex<MemoryStore>>, AgentError> {
     Ok(Arc::new(Mutex::new(store)))
 }
 
+fn build_client(provider: ProviderArg) -> Result<ChatClient, AgentError> {
+    Ok(match provider {
+        ProviderArg::Anthropic => ChatClient::Anthropic(AnthropicClient::new(None)?),
+        ProviderArg::Openai => ChatClient::OpenAI(OpenAIClient::new(None)?),
+        ProviderArg::Gemini => ChatClient::Gemini(GeminiClient::new(None)?),
+    })
+}
+
 fn build_plugin_registry(cli: &Cli) -> PluginRegistry {
     let mut registry = PluginRegistry::new();
 
@@ -146,14 +160,6 @@ fn build_plugin_registry(cli: &Cli) -> PluginRegistry {
     registry
 }
 
-fn build_client(provider: ProviderArg) -> Result<ChatClient, AgentError> {
-    Ok(match provider {
-        ProviderArg::Anthropic => ChatClient::Anthropic(AnthropicClient::new(None)?),
-        ProviderArg::Openai => ChatClient::OpenAI(OpenAIClient::new(None)?),
-        ProviderArg::Gemini => ChatClient::Gemini(GeminiClient::new(None)?),
-    })
-}
-
 async fn run_headless(cli: &Cli, prompt: &str) -> Result<(), AgentError> {
     let config = build_config(cli);
     let client = build_client(cli.provider)?;
@@ -167,18 +173,36 @@ async fn run_headless(cli: &Cli, prompt: &str) -> Result<(), AgentError> {
     let search = WebSearchTool;
     let mem = MemoryTool::new(memory_store);
     let mut tools: Vec<&dyn Tool> = vec![&bash, &read, &write, &list, &search, &mem];
-
     let plugin_tools = registry.tools();
     tools.extend(&plugin_tools);
 
-    let repl = Repl::new(&client, &config, tools);
-    let conversation = repl.run(prompt).await?;
-
-    if let Some(last) = conversation.last() {
-        let text = last.text();
-        if !text.is_empty() {
-            println!("{text}");
+    let print_result = |conversation: &[agenty_core::ChatMessage]| {
+        if let Some(last) = conversation.last() {
+            let text = last.text();
+            if !text.is_empty() {
+                println!("{text}");
+            }
         }
+    };
+
+    if let Some(rpm) = cli.rpm {
+        let client = RateLimitedClient::new(client, rpm);
+        // Log to stderr when the rate limiter kicks in.
+        let mut status_rx = client.status_rx();
+        tokio::spawn(async move {
+            while status_rx.changed().await.is_ok() {
+                if *status_rx.borrow() == agenty_providers::rate_limit::RateLimitStatus::Throttled {
+                    eprintln!("rate limited — waiting for permit…");
+                }
+            }
+        });
+        let repl = Repl::new(&client, &config, tools);
+        let conversation = repl.run(prompt).await?;
+        print_result(&conversation);
+    } else {
+        let repl = Repl::new(&client, &config, tools);
+        let conversation = repl.run(prompt).await?;
+        print_result(&conversation);
     }
     Ok(())
 }
@@ -196,10 +220,16 @@ async fn run_tui(cli: &Cli) -> Result<(), AgentError> {
     let search = WebSearchTool;
     let mem = MemoryTool::new(memory_store);
     let mut tools: Vec<&dyn Tool> = vec![&bash, &read, &write, &list, &search, &mem];
-
     let plugin_tools = registry.tools();
     tools.extend(&plugin_tools);
 
-    let repl = Repl::new(&client, &config, tools);
-    agenty_tui::run(repl).await
+    if let Some(rpm) = cli.rpm {
+        let client = RateLimitedClient::new(client, rpm);
+        let status_rx = client.status_rx();
+        let repl = Repl::new(&client, &config, tools);
+        agenty_tui::run_with_rate_limit(repl, status_rx).await
+    } else {
+        let repl = Repl::new(&client, &config, tools);
+        agenty_tui::run(repl).await
+    }
 }

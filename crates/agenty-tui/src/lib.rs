@@ -4,7 +4,8 @@ use std::collections::BTreeMap;
 use std::io::{self, Stdout};
 
 use agenty_core::{AgentError, ChatMessage, ContentBlock, Role, StopReason};
-use agenty_providers::{BlockKind, ProviderStreamEvent};
+use agenty_providers::rate_limit::RateLimitStatus;
+use agenty_providers::{BlockKind, ChatProvider, ProviderStreamEvent};
 use agenty_repl::Repl;
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyEventKind,
@@ -23,6 +24,7 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
+use tokio::sync::watch;
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
 
@@ -69,9 +71,23 @@ const BANNER_WIDTH: u16 = 52;
 // Entry point
 // ---------------------------------------------------------------------------
 
-pub async fn run(repl: Repl<'_>) -> Result<(), AgentError> {
+pub async fn run<C: ChatProvider>(repl: Repl<'_, C>) -> Result<(), AgentError> {
+    run_with_options(repl, None).await
+}
+
+pub async fn run_with_rate_limit<C: ChatProvider>(
+    repl: Repl<'_, C>,
+    rate_limit_rx: watch::Receiver<RateLimitStatus>,
+) -> Result<(), AgentError> {
+    run_with_options(repl, Some(rate_limit_rx)).await
+}
+
+async fn run_with_options<C: ChatProvider>(
+    repl: Repl<'_, C>,
+    rate_limit_rx: Option<watch::Receiver<RateLimitStatus>>,
+) -> Result<(), AgentError> {
     let mut terminal = init_terminal().map_err(io_err)?;
-    let result = event_loop(&mut terminal, repl).await;
+    let result = event_loop(&mut terminal, repl, rate_limit_rx).await;
     let _ = restore_terminal(&mut terminal);
     result
 }
@@ -131,13 +147,19 @@ struct AppState {
     completions: Vec<String>,
     /// Active tab-completion session (None when not completing).
     tab: Option<TabComplete>,
+    /// Rate limit status observer (None when rate limiting is disabled).
+    rate_limit_rx: Option<watch::Receiver<RateLimitStatus>>,
 }
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const THINKING_DOTS: &[&str] = &["", ".", "..", "..."];
 
 impl AppState {
-    fn new(model: String, completions: Vec<String>) -> Self {
+    fn new(
+        model: String,
+        completions: Vec<String>,
+        rate_limit_rx: Option<watch::Receiver<RateLimitStatus>>,
+    ) -> Self {
         Self {
             input: String::new(),
             status: Status::Idle,
@@ -150,7 +172,15 @@ impl AppState {
             anim_tick: 0,
             completions,
             tab: None,
+            rate_limit_rx,
         }
+    }
+
+    /// Check if the rate limiter is currently throttling.
+    fn is_throttled(&self) -> bool {
+        self.rate_limit_rx
+            .as_ref()
+            .is_some_and(|rx| *rx.borrow() == RateLimitStatus::Throttled)
     }
 }
 
@@ -262,6 +292,8 @@ impl StreamingState {
         }
     }
 
+    /// Is any thinking block currently receiving deltas (or present at all
+    /// during this turn)? Used to drive the status-bar spinner.
     fn has_thinking(&self) -> bool {
         self.blocks
             .values()
@@ -308,7 +340,11 @@ impl StreamingState {
 // Event loop
 // ---------------------------------------------------------------------------
 
-async fn event_loop(terminal: &mut Term, repl: Repl<'_>) -> Result<(), AgentError> {
+async fn event_loop<C: ChatProvider>(
+    terminal: &mut Term,
+    repl: Repl<'_, C>,
+    rate_limit_rx: Option<watch::Receiver<RateLimitStatus>>,
+) -> Result<(), AgentError> {
     let mut completions: Vec<String> = vec![
         "/help".into(),
         "/clear".into(),
@@ -316,7 +352,7 @@ async fn event_loop(terminal: &mut Term, repl: Repl<'_>) -> Result<(), AgentErro
         "/checkpoint".into(),
     ];
     completions.extend(repl.tool_specs().iter().map(|s| s.name.clone()));
-    let mut app = AppState::new(repl.config().model.clone(), completions);
+    let mut app = AppState::new(repl.config().model.clone(), completions, rate_limit_rx);
     let mut events = EventStream::new();
     let mut conversation: Vec<ChatMessage> = Vec::new();
     let mut streaming = StreamingState::new();
@@ -409,9 +445,9 @@ fn dispatch_slash(input: &str) -> Option<SlashAction> {
     })
 }
 
-async fn run_agent_loop(
+async fn run_agent_loop<C: ChatProvider>(
     terminal: &mut Term,
-    repl: &Repl<'_>,
+    repl: &Repl<'_, C>,
     conversation: &mut Vec<ChatMessage>,
     streaming: &mut StreamingState,
     app: &mut AppState,
@@ -454,9 +490,9 @@ async fn run_agent_loop(
     )))
 }
 
-async fn stream_one_turn(
+async fn stream_one_turn<C: ChatProvider>(
     terminal: &mut Term,
-    repl: &Repl<'_>,
+    repl: &Repl<'_, C>,
     conversation: &[ChatMessage],
     streaming: &mut StreamingState,
     app: &mut AppState,
@@ -1577,28 +1613,39 @@ fn render_status(
     };
 
     let thinking = streaming.active && streaming.has_thinking();
-    let status_text = match &app.status {
-        Status::Idle => String::new(),
-        Status::Streaming if thinking => {
-            let spinner = SPINNER_FRAMES[(app.anim_tick as usize) % SPINNER_FRAMES.len()];
-            let dots = THINKING_DOTS[(app.anim_tick as usize / 3) % THINKING_DOTS.len()];
-            format!(" {spinner} thinking{dots} ")
+    let status_text = if app.is_throttled() {
+        " ⏳ rate limited — waiting… ".to_string()
+    } else {
+        match &app.status {
+            Status::Idle => String::new(),
+            Status::Streaming if thinking => {
+                let spinner = SPINNER_FRAMES[(app.anim_tick as usize) % SPINNER_FRAMES.len()];
+                let dots = THINKING_DOTS[(app.anim_tick as usize / 3) % THINKING_DOTS.len()];
+                format!(" {spinner} thinking{dots} ")
+            }
+            Status::Streaming => " streaming… ".into(),
+            Status::RunningTools => " running tools… ".into(),
+            Status::Info(t) => format!(" ⓘ {t} "),
+            Status::Error(t) => format!(" ✕ {t} "),
         }
-        Status::Streaming => " streaming… ".into(),
-        Status::RunningTools => " running tools… ".into(),
-        Status::Info(t) => format!(" ⓘ {t} "),
-        Status::Error(t) => format!(" ✕ {t} "),
     };
-    let status_style = match &app.status {
-        Status::Idle | Status::Info(_) => Style::default().fg(theme::DIM).bg(theme::STATUS_BG),
-        Status::Streaming if thinking => Style::default()
-            .fg(theme::PURPLE_LIGHT)
+    let status_style = if app.is_throttled() {
+        Style::default()
+            .fg(theme::AMBER)
             .bg(theme::STATUS_BG)
-            .add_modifier(Modifier::BOLD),
-        Status::Streaming | Status::RunningTools => {
-            Style::default().fg(theme::AMBER).bg(theme::STATUS_BG)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        match &app.status {
+            Status::Idle | Status::Info(_) => Style::default().fg(theme::DIM).bg(theme::STATUS_BG),
+            Status::Streaming if thinking => Style::default()
+                .fg(theme::PURPLE_LIGHT)
+                .bg(theme::STATUS_BG)
+                .add_modifier(Modifier::BOLD),
+            Status::Streaming | Status::RunningTools => {
+                Style::default().fg(theme::AMBER).bg(theme::STATUS_BG)
+            }
+            Status::Error(_) => Style::default().fg(theme::RED_LIGHT).bg(theme::STATUS_BG),
         }
-        Status::Error(_) => Style::default().fg(theme::RED_LIGHT).bg(theme::STATUS_BG),
     };
 
     let total_tokens = app.input_tokens + app.output_tokens + app.last_output as u64;

@@ -5,22 +5,38 @@ mod commands;
 
 pub use commands::{Command, ReplOutcome, ReplSession, parse_command};
 
-use agenty_providers::ChatClient;
+use agenty_core::{AgentError, ChatMessage, Config, ContentBlock, StopReason, ToolSpec};
+use agenty_providers::ChatProvider;
 use agenty_tools::Tool;
-use agenty_core::{
-    AgentError, ChatMessage, Config, ContentBlock, StopReason, ToolSpec,
-};
 
 /// Incremental progress from a streaming turn. TUIs and other consumers
 /// assemble these into live UI updates.
 #[derive(Debug, Clone)]
 pub enum StreamDelta {
-    TextDelta { index: u32, text: String },
-    ThinkingDelta { index: u32, text: String },
-    ToolUseStart { index: u32, id: String, name: String },
-    ToolInputDelta { index: u32, partial_json: String },
-    BlockStop { index: u32 },
-    MessageComplete { content: Vec<ContentBlock>, stop_reason: StopReason },
+    TextDelta {
+        index: u32,
+        text: String,
+    },
+    ThinkingDelta {
+        index: u32,
+        text: String,
+    },
+    ToolUseStart {
+        index: u32,
+        id: String,
+        name: String,
+    },
+    ToolInputDelta {
+        index: u32,
+        partial_json: String,
+    },
+    BlockStop {
+        index: u32,
+    },
+    MessageComplete {
+        content: Vec<ContentBlock>,
+        stop_reason: StopReason,
+    },
     Error(String),
 }
 
@@ -39,20 +55,21 @@ impl Default for ReplOptions {
 
 /// Orchestrates a single user-prompt → final-answer query, running any tool
 /// calls the model requests in between.
-pub struct Repl<'a> {
-    client: &'a ChatClient,
+pub struct Repl<'a, C = agenty_providers::ChatClient> {
+    client: &'a C,
     config: &'a Config,
     tools: Vec<&'a dyn Tool>,
     options: ReplOptions,
 }
 
-impl<'a> Repl<'a> {
-    pub fn new(
-        client: &'a ChatClient,
-        config: &'a Config,
-        tools: Vec<&'a dyn Tool>,
-    ) -> Self {
-        Self { client, config, tools, options: ReplOptions::default() }
+impl<'a, C: ChatProvider> Repl<'a, C> {
+    pub fn new(client: &'a C, config: &'a Config, tools: Vec<&'a dyn Tool>) -> Self {
+        Self {
+            client,
+            config,
+            tools,
+            options: ReplOptions::default(),
+        }
     }
 
     pub fn with_options(mut self, options: ReplOptions) -> Self {
@@ -105,7 +122,7 @@ impl<'a> Repl<'a> {
         )))
     }
 
-    pub fn client(&self) -> &'a ChatClient {
+    pub fn client(&self) -> &'a C {
         self.client
     }
 

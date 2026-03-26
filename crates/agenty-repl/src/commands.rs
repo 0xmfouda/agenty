@@ -1,11 +1,10 @@
 //! Slash-command dispatch wrapped around a persistent [`Repl`].
-//!
-//! [`Repl`]: crate::Repl
 
 use std::path::{Path, PathBuf};
 
-use agenty_session::Session;
 use agenty_core::{AgentError, ChatMessage};
+use agenty_providers::ChatProvider;
+use agenty_session::Session;
 
 use crate::Repl;
 
@@ -23,7 +22,9 @@ pub enum Command {
 #[derive(Debug)]
 pub enum ReplOutcome {
     /// A normal model response; contains the messages appended this turn.
-    Response { new_messages: Vec<ChatMessage> },
+    Response {
+        new_messages: Vec<ChatMessage>,
+    },
     Help(String),
     Cleared,
     Checkpointed(PathBuf),
@@ -57,16 +58,16 @@ pub fn parse_command(input: &str) -> Option<Command> {
 
 /// Persistent REPL: holds conversation state across multiple inputs and
 /// dispatches slash commands.
-pub struct ReplSession<'a> {
-    repl: Repl<'a>,
+pub struct ReplSession<'a, C = agenty_providers::ChatClient> {
+    repl: Repl<'a, C>,
     session_id: String,
     conversation: Vec<ChatMessage>,
     checkpoint_dir: PathBuf,
 }
 
-impl<'a> ReplSession<'a> {
+impl<'a, C: ChatProvider> ReplSession<'a, C> {
     pub fn new(
-        repl: Repl<'a>,
+        repl: Repl<'a, C>,
         session_id: impl Into<String>,
         checkpoint_dir: impl AsRef<Path>,
     ) -> Self {
@@ -94,7 +95,9 @@ impl<'a> ReplSession<'a> {
         }
 
         let start = self.conversation.len();
-        self.repl.run_turn(&mut self.conversation, input.trim()).await?;
+        self.repl
+            .run_turn(&mut self.conversation, input.trim())
+            .await?;
         Ok(ReplOutcome::Response {
             new_messages: self.conversation[start..].to_vec(),
         })
@@ -109,8 +112,7 @@ impl<'a> ReplSession<'a> {
             }
             Command::Exit => Ok(ReplOutcome::Exit),
             Command::Checkpoint => {
-                let mut session =
-                    Session::new(self.session_id.clone(), self.repl.config().clone());
+                let mut session = Session::new(self.session_id.clone(), self.repl.config().clone());
                 for msg in &self.conversation {
                     session.push_message(msg.clone());
                 }
@@ -126,9 +128,9 @@ impl<'a> ReplSession<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agenty_core::{ChatMessage, ContentBlock, Provider};
     use agenty_providers::ChatClient;
     use agenty_providers::anthropic::AnthropicClient;
-    use agenty_core::{ChatMessage, ContentBlock, Provider};
 
     fn dummy_config() -> agenty_core::Config {
         agenty_core::Config {
@@ -143,9 +145,7 @@ mod tests {
     fn dummy_client() -> ChatClient {
         // An explicit key means `new` does not require the env var; no network
         // call happens for the command-only tests below.
-        ChatClient::Anthropic(
-            AnthropicClient::new(Some("sk-ant-test-not-real".into())).unwrap(),
-        )
+        ChatClient::Anthropic(AnthropicClient::new(Some("sk-ant-test-not-real".into())).unwrap())
     }
 
     fn dummy_session<'a>(
@@ -212,9 +212,11 @@ mod tests {
 
         // Seed the conversation without going through the provider.
         session.conversation.push(ChatMessage::user_text("hello"));
-        session.conversation.push(ChatMessage::assistant(vec![
-            ContentBlock::Text { text: "hi".into() },
-        ]));
+        session
+            .conversation
+            .push(ChatMessage::assistant(vec![ContentBlock::Text {
+                text: "hi".into(),
+            }]));
         assert_eq!(session.conversation().len(), 2);
 
         let outcome = session.handle_input("/clear").await.unwrap();
@@ -241,9 +243,11 @@ mod tests {
         let mut session = dummy_session(&client, &config, dir.path());
 
         session.conversation.push(ChatMessage::user_text("hello"));
-        session.conversation.push(ChatMessage::assistant(vec![
-            ContentBlock::Text { text: "hi there".into() },
-        ]));
+        session
+            .conversation
+            .push(ChatMessage::assistant(vec![ContentBlock::Text {
+                text: "hi there".into(),
+            }]));
 
         let outcome = session.handle_input("/checkpoint").await.unwrap();
         let path = match outcome {
