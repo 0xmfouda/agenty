@@ -4,6 +4,7 @@ mod bash;
 mod list_files;
 mod memory;
 mod read_file;
+pub mod sandbox;
 mod web_search;
 mod write_file;
 

@@ -10,6 +10,8 @@ use agenty_providers::gemini::GeminiClient;
 use agenty_providers::openai::OpenAIClient;
 use agenty_providers::rate_limit::RateLimitedClient;
 use agenty_repl::Repl;
+#[cfg(target_os = "linux")]
+use agenty_tools::sandbox::SandboxPolicy;
 use agenty_tools::{
     BashTool, ListFilesTool, MemoryTool, ReadFileTool, Tool, WebSearchTool, WriteFileTool,
 };
@@ -166,7 +168,10 @@ async fn run_headless(cli: &Cli, prompt: &str) -> Result<(), AgentError> {
     let memory_store = build_memory_store()?;
     let registry = build_plugin_registry(cli);
 
-    let bash = BashTool;
+    #[cfg(target_os = "linux")]
+    let bash = BashTool::new(SandboxPolicy::default());
+    #[cfg(not(target_os = "linux"))]
+    let bash = BashTool::new();
     let read = ReadFileTool;
     let write = WriteFileTool;
     let list = ListFilesTool;
@@ -213,7 +218,10 @@ async fn run_tui(cli: &Cli) -> Result<(), AgentError> {
     let memory_store = build_memory_store()?;
     let registry = build_plugin_registry(cli);
 
-    let bash = BashTool;
+    #[cfg(target_os = "linux")]
+    let bash = BashTool::new(SandboxPolicy::default());
+    #[cfg(not(target_os = "linux"))]
+    let bash = BashTool::new();
     let read = ReadFileTool;
     let write = WriteFileTool;
     let list = ListFilesTool;

@@ -89,6 +89,7 @@ version = "0.1.0"
 dependencies = [
  "agenty-core",
  "agenty-memory",
+ "libc",
  "reqwest",
  "scraper",
  "serde",
