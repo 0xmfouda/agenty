@@ -32,4 +32,13 @@ cargo run -- -s "You are terse." -p "hello"     # system prompt
 cargo run -- --max-tokens 2048
 ```
 
-In the TUI: `Enter` to send · `PageUp`/`PageDown`, `Shift+↑/↓`, mouse wheel to scroll · `End` jumps to bottom · `/clear`, `/exit` · `Ctrl+C` to cancel.
+## Tools
+
+| Feature | Description | Preview |
+|---------|-------------|---------|
+| **Bash** | Run shell commands and return stdout, stderr, and exit code | <img src="./assets/bash.png" width="400"> |
+| **Read File** | Read file contents from the local filesystem | <img src="./assets/read_file.png" width="400"> |
+| **Write File** | Create or overwrite files on disk | <img src="./assets/write_file.png" width="400"> |
+| **List Files** | List directory contents with file metadata | <img src="./assets/list_files.png" width="400"> |
+| **Web Search** | Search the web via DuckDuckGo directly from the conversation | <img src="./assets/web_search.png" width="400"> |
+| **Memory** | Persistent memory across conversations — save, search, and recall context | <img src="./assets/memory.png" width="400"> |
