@@ -1,40 +1,52 @@
 ---
-title: Welcome to Starlight
-description: Get started building your docs site with Starlight.
-template: splash # Remove or comment out this line to display the site sidebar on this page.
+title: Agenty
+description: A modular, tool-using AI agent framework written in Rust.
+template: splash
 hero:
-  tagline: Congrats on setting up a new Starlight project!
+  tagline: A modular, tool-using AI agent framework written in Rust. Ship headless or interactive agents with built-in sandboxing, persistent memory, and a plugin system.
   image:
     file: ../../assets/houston.webp
   actions:
-    - text: Example Guide
-      link: /guides/example/
+    - text: Getting Started
+      link: /guides/getting-started/
       icon: right-arrow
-    - text: Read the Starlight docs
-      link: https://starlight.astro.build
+    - text: Reference
+      link: /reference/cli/
       icon: external
       variant: minimal
 ---
 
 import { Card, CardGrid } from '@astrojs/starlight/components';
 
-## Next steps
+## Why Agenty?
 
 <CardGrid stagger>
-	<Card title="Update content" icon="pencil">
-		Edit `src/content/docs/index.mdx` to see this page change.
+	<Card title="Multi-provider" icon="rocket">
+		Route requests to **Anthropic**, **OpenAI**, or **Google Gemini** with a single flag. Swap models without changing your code.
 	</Card>
-	<Card title="Change page layout" icon="document">
-		Delete `template: splash` in `src/content/docs/index.mdx` to display a
-		sidebar on this page.
+	<Card title="Sandboxed execution" icon="approve-check-circle">
+		On Linux, shell commands run inside a Landlock + namespace sandbox with resource limits and a wall-clock timeout.
 	</Card>
-	<Card title="Add new content" icon="add-document">
-		Add Markdown or MDX files to `src/content/docs` to create new pages.
+	<Card title="Built-in tools" icon="setting">
+		File I/O, shell execution, web search, and persistent memory are included out of the box. The agent decides when and how to use them.
 	</Card>
-	<Card title="Configure your site" icon="setting">
-		Edit your `sidebar` and other config in `astro.config.mjs`.
-	</Card>
-	<Card title="Read the docs" icon="open-book">
-		Learn more in [the Starlight Docs](https://starlight.astro.build/).
+	<Card title="Plugin system" icon="add-document">
+		Extend the agent with script-based plugins. Drop a `plugin.toml` manifest and a script into `~/.agenty/plugins/` and the agent picks them up automatically.
 	</Card>
 </CardGrid>
+
+## Architecture
+
+Agenty is split into focused workspace crates:
+
+| Crate | Role |
+|---|---|
+| `agenty-core` | Shared types: messages, tool calls, config, errors |
+| `agenty-providers` | LLM clients for Anthropic, OpenAI, and Gemini |
+| `agenty-tools` | Built-in tool implementations and sandbox |
+| `agenty-plugins` | Plugin discovery, manifest parsing, script execution |
+| `agenty-memory` | Persistent memory store (JSON files on disk) |
+| `agenty-repl` | Query loop that orchestrates provider calls and tool invocations |
+| `agenty-session` | Session persistence (conversation + token usage) |
+| `agenty-tui` | Terminal UI for interactive conversations |
+| `agenty-cli` | CLI entry point and argument parsing |
