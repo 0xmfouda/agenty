@@ -41,4 +41,13 @@ cargo run -- --max-tokens 2048
 | **Write File** | Create or overwrite files on disk | <img src="./assets/write_file.png" width="400"> |
 | **List Files** | List directory contents with file metadata | <img src="./assets/list_files.png" width="400"> |
 | **Web Search** | Search the web via DuckDuckGo directly from the conversation | <img src="./assets/web_search.png" width="400"> |
-| **Memory** | Persistent memory across conversations — save, search, and recall context | <img src="./assets/memory.png" width="400"> |
+| **Memory** | Persistent memory across conversations | <img src="./assets/memory.png" width="400"> |
+
+## Features
+
+- **Multi-provider** -- Support multiple providers, e.g. Anthropic, OpenAI, and Gemini.
+- **Sandboxed shell** -- on Linux, bash commands run inside a Landlock + network namespace sandbox with memory limits and a kill timeout. 
+- **Persistent memory** -- the agent can save, search, and recall context across sessions. Stored as plain JSON files under `~/.agenty/memory/`.
+- **Plugin system** -- provider your plugin on `~/.agenty/plugins/` and the agent will picks it up. 
+- **Rate limiting** -- built-in request throttling with `--rpm`.
+- **Session streaming** -- the TUI streams tokens, thinking blocks, and tool calls as they happen.

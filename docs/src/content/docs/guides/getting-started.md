@@ -100,6 +100,5 @@ The agent pauses automatically when it hits the limit and resumes when a slot op
 ## Next steps
 
 - [Built-in Tools](/guides/tools/) to see what the agent can do out of the box
-- [Sandbox and Security](/guides/sandbox/) to understand how shell commands are isolated
 - [Plugins](/guides/plugins/) to extend the agent with your own tools
 - [CLI Reference](/reference/cli/) for the full list of flags
