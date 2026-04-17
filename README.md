@@ -51,3 +51,15 @@ cargo run -- --max-tokens 2048
 - **Plugin system** -- provider your plugin on `~/.agenty/plugins/` and the agent will picks it up. 
 - **Rate limiting** -- built-in request throttling with `--rpm`.
 - **Session streaming** -- the TUI streams tokens, thinking blocks, and tool calls as they happen.
+
+## Docs
+
+The documentation site is built with [Astro Starlight](https://starlight.astro.build/). To run it locally:
+
+```bash
+cd docs
+npm install
+npm run dev
+```
+
+Then open http://localhost:4321 in your browser.

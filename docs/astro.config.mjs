@@ -18,7 +18,6 @@ export default defineConfig({
           items: [
             { label: "Getting Started", slug: "guides/getting-started" },
             { label: "Built-in Tools", slug: "guides/tools" },
-            { label: "Sandbox and Security", slug: "guides/sandbox" },
             { label: "Plugins", slug: "guides/plugins" },
           ],
         },

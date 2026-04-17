@@ -186,4 +186,4 @@ If a manifest fails to parse, agenty prints a warning and continues loading othe
 
 ## Security note
 
-Plugin commands run without sandboxing. They execute with the same permissions as the agenty process. If you are running untrusted plugins, consider running the entire agent inside a container.
+Plugin commands run without sandboxing. They execute with the same permissions as the agenty process. If you are running untrusted plugins, consider running the entire agent inside a container. This should be fixed soon.
